@@ -1,0 +1,1006 @@
+import React, { useState, useEffect } from 'react';
+import {
+  Sun,
+  Zap,
+  BatteryCharging,
+  Power,
+  RefreshCw,
+  ExternalLink,
+  Code,
+  Activity,
+  ArrowRight,
+  Info,
+  ShieldCheck,
+  CheckCircle2,
+  Sparkles,
+  Layers,
+  Cpu,
+  Waves,
+  Clock,
+  Radio
+} from 'lucide-react';
+import { PltsSummary } from '../types';
+
+interface PltsIsometricFlowProps {
+  summary: PltsSummary | null;
+  onRefresh: () => Promise<void>;
+}
+
+export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, onRefresh }) => {
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [showRawJson, setShowRawJson] = useState(false);
+  const [selectedNode, setSelectedNode] = useState<'pv' | 'device' | 'battery' | 'load' | 'grid' | null>(null);
+  const [lastFetchTime, setLastFetchTime] = useState<string>(new Date().toLocaleTimeString('id-ID'));
+  const [countdown, setCountdown] = useState<number>(10);
+
+  // Live real data from Dessmonitor API
+  const pvW = summary?.pvPowerW ?? 32.3;
+  const batSoc = summary?.batterySocPct ?? 68.0;
+  const loadW = summary?.loadPowerW ?? 167.0;
+  const gridW = summary?.gridPowerW ?? 0.0;
+  const rawVoltage = summary?.gridVoltageV ?? 211.0;
+  const rawFreq = summary?.gridFrequencyHz ?? 50.0;
+  const rawCurrent = summary?.loadCurrentA ?? 0.7;
+  const rawDate = summary?.lastUpdated || summary?.rawFlow?.date || 'Live';
+
+  // Compute live battery power & direction from API
+  let batteryPowerW = summary?.batteryPowerW ?? 0;
+  let batteryDirection: 'charging' | 'discharging' | 'idle' = 'discharging';
+
+  if (pvW > loadW) {
+    batteryDirection = 'charging';
+    batteryPowerW = batteryPowerW > 0 ? batteryPowerW : pvW - loadW;
+  } else if (pvW < loadW) {
+    batteryDirection = 'discharging';
+    batteryPowerW = batteryPowerW > 0 ? batteryPowerW : loadW - pvW;
+  } else {
+    batteryDirection = 'idle';
+    batteryPowerW = 0;
+  }
+
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      await onRefresh();
+      setLastFetchTime(new Date().toLocaleTimeString('id-ID'));
+      setCountdown(10);
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
+  // Fixed 10s auto refresh interval with live countdown
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCountdown((prev) => {
+        if (prev <= 1) {
+          onRefresh().catch(console.error);
+          setLastFetchTime(new Date().toLocaleTimeString('id-ID'));
+          return 10;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [onRefresh]);
+
+  // Standard fixed normal animation speed
+  const animDuration = '2.2s';
+
+  const dessmonitorApiUrl = "http://api.dessmonitor.com/public/?sign=93b4c5aa2ee4aa70f9bc9fece80f4f55f6df868b&salt=1784439754509&token=CNb1f7517a-e902-48b2-a9d7-ddcf00c861f6&action=webQueryDeviceEnergyFlowEs&pn=I30000251304326127&devcode=6513&devaddr=1&sn=I30000251304326127197101&source=1";
+
+  return (
+    <div className="space-y-6">
+      {/* Top Header Card */}
+      <div className="bg-[#0f172a]/90 backdrop-blur-xl border border-slate-800/90 rounded-2xl p-6 shadow-[0_8px_30px_rgb(0,0,0,0.5)]">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          <div>
+            <div className="flex flex-wrap items-center gap-2 mb-2">
+              <span className="px-3 py-1 rounded-full text-xs font-bold bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 flex items-center gap-1.5 shadow-[0_0_10px_rgba(6,182,212,0.25)]">
+                <Zap className="w-3.5 h-3.5 text-cyan-400 animate-pulse" /> Dessmonitor Energy Flow Diagram
+              </span>
+              <span className="px-2.5 py-0.5 rounded-full text-[11px] font-mono bg-emerald-950/80 text-emerald-300 border border-emerald-800/70 flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+                Live API: webQueryDeviceEnergyFlowEs
+              </span>
+              <span className="text-xs text-slate-400 font-mono">
+                Timestamp: <strong className="text-slate-200">{rawDate}</strong>
+              </span>
+            </div>
+            <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+              Visualisasi Animasi Arus Daya PLTS Kolam Nila
+            </h1>
+            <p className="text-xs sm:text-sm text-slate-300 max-w-3xl mt-1">
+              Diagram alur arus energi fotovoltaik (PV), baterai penyimpanan LiFePO4, inverter sentral kolam, beban aerator kincir air, dan interkoneksi PLN secara real-time langsung dari Dessmonitor API.
+            </p>
+          </div>
+
+          {/* Quick Action Controls */}
+          <div className="flex flex-wrap items-center gap-2.5">
+            <button
+              id="btn-refresh-flow"
+              onClick={handleRefresh}
+              disabled={isRefreshing}
+              className="flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 disabled:opacity-50 text-white rounded-xl font-semibold text-xs shadow-[0_0_18px_rgba(6,182,212,0.4)] transition-all"
+            >
+              <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+              {isRefreshing ? 'Mengambil Data...' : 'Refresh Sekarang'}
+            </button>
+
+            <button
+              onClick={() => setShowRawJson(!showRawJson)}
+              className="flex items-center gap-1.5 px-3.5 py-2.5 bg-[#020617] hover:bg-slate-800 text-slate-300 rounded-xl text-xs font-medium border border-slate-800 transition-colors"
+            >
+              <Code className="w-4 h-4 text-cyan-400" />
+              {showRawJson ? 'Tutup Payload' : 'Lihat Raw API'}
+            </button>
+
+            <a
+              href={dessmonitorApiUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="p-2.5 bg-[#020617] hover:bg-slate-800 text-slate-400 hover:text-cyan-400 rounded-xl border border-slate-800 transition-colors"
+              title="Buka Endpoint Dessmonitor Asli di Tab Baru"
+            >
+              <ExternalLink className="w-4 h-4" />
+            </a>
+          </div>
+        </div>
+
+        {/* Toolbar: Live Mode & 10s Auto Refresh Info */}
+        <div className="mt-5 pt-4 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-3 text-xs">
+          <div className="flex items-center gap-2">
+            <span className="text-slate-400 font-medium flex items-center gap-1.5">
+              <Activity className="w-3.5 h-3.5 text-cyan-400" /> Mode Alur:
+            </span>
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#020617] border border-cyan-500/30 text-cyan-300 font-semibold shadow-[0_0_10px_rgba(6,182,212,0.2)]">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span>📡 Live API Dessmonitor (Real-Time)</span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-4 text-slate-400">
+            {/* Auto refresh badge with 10s countdown */}
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#020617] border border-slate-800 text-xs">
+              <Clock className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Auto-refresh:</span>
+              <span className="font-mono font-bold text-cyan-300">{countdown}s</span>
+              <span className="text-slate-600">|</span>
+              <span className="text-[11px] text-slate-400">Update: {lastFetchTime}</span>
+            </div>
+
+            {/* Animation Speed Status */}
+            <div className="hidden sm:flex items-center gap-1.5 text-xs text-slate-400">
+              <span>Kecepatan Alur:</span>
+              <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-200 font-semibold text-[11px]">Normal</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Main Isometric Animated Canvas */}
+      <div className="bg-[#0b131e] rounded-3xl border border-slate-800/90 shadow-[0_20px_50px_rgba(0,0,0,0.8)] relative overflow-hidden p-4 sm:p-8">
+        
+        {/* Subtle Ambient Radial Light Halos behind nodes */}
+        <div className="absolute top-[18%] left-[27%] -translate-x-1/2 -translate-y-1/2 w-80 h-80 bg-cyan-500/10 rounded-full blur-3xl pointer-events-none" />
+        <div className="absolute top-[50%] left-[50%] -translate-x-1/2 -translate-y-1/2 w-96 h-96 bg-blue-500/10 rounded-full blur-3xl pointer-events-none" />
+        <div className="absolute bottom-[18%] left-[27%] -translate-x-1/2 -translate-y-1/2 w-80 h-80 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none" />
+        <div className="absolute bottom-[18%] right-[27%] translate-x-1/2 -translate-y-1/2 w-80 h-80 bg-cyan-500/10 rounded-full blur-3xl pointer-events-none" />
+
+        {/* Live Power Overlay Tags placed accurately matching the image */}
+        <div className="w-full relative select-none">
+          
+          <svg
+            viewBox="0 0 1000 580"
+            className="w-full h-auto drop-shadow-2xl overflow-visible"
+            style={{ minHeight: '440px' }}
+          >
+            <defs>
+              {/* Radial glow filter */}
+              <filter id="glow-gold" x="-50%" y="-50%" width="200%" height="200%">
+                <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blur" />
+                <feMerge>
+                  <feMergeNode in="blur" />
+                  <feMergeNode in="SourceGraphic" />
+                </feMerge>
+              </filter>
+
+              <filter id="glow-cyan" x="-50%" y="-50%" width="200%" height="200%">
+                <feGaussianBlur in="SourceGraphic" stdDeviation="4" result="blur" />
+                <feMerge>
+                  <feMergeNode in="blur" />
+                  <feMergeNode in="SourceGraphic" />
+                </feMerge>
+              </filter>
+
+              <filter id="pedestal-blur" x="-50%" y="-50%" width="200%" height="200%">
+                <feGaussianBlur in="SourceGraphic" stdDeviation="8" />
+              </filter>
+
+              {/* Gradient definitions for pipes and pedestals */}
+              <linearGradient id="pipe-dark" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stopColor="#1e293b" />
+                <stop offset="100%" stopColor="#0f172a" />
+              </linearGradient>
+
+              <linearGradient id="pedestal-top" x1="0%" y1="0%" x2="0%" y2="100%">
+                <stop offset="0%" stopColor="#1e293b" />
+                <stop offset="100%" stopColor="#0f172a" />
+              </linearGradient>
+
+              <linearGradient id="pedestal-rim" x1="0%" y1="0%" x2="100%" y2="0%">
+                <stop offset="0%" stopColor="#38bdf8" stopOpacity="0.8" />
+                <stop offset="100%" stopColor="#0284c7" stopOpacity="0.3" />
+              </linearGradient>
+
+              <linearGradient id="inverter-blue" x1="0%" y1="0%" x2="0%" y2="100%">
+                <stop offset="0%" stopColor="#38bdf8" />
+                <stop offset="100%" stopColor="#0284c7" />
+              </linearGradient>
+            </defs>
+
+            {/* Custom CSS Animation Keyframes for smooth continuous particle flow */}
+            <style>
+              {`
+                @keyframes flowForward {
+                  from { stroke-dashoffset: 44; }
+                  to { stroke-dashoffset: 0; }
+                }
+                @keyframes flowBackward {
+                  from { stroke-dashoffset: 0; }
+                  to { stroke-dashoffset: 44; }
+                }
+                .flow-dots-forward {
+                  animation: flowForward ${animDuration} linear infinite;
+                }
+                .flow-dots-backward {
+                  animation: flowBackward ${animDuration} linear infinite;
+                }
+              `}
+            </style>
+
+            {/* ========================================================= */}
+            {/* 1. PIPELINE TRACKS (Dark rounded conduits behind particles) */}
+            {/* ========================================================= */}
+            
+            {/* Path 1: PV -> Device (From (275, 140) down to (275, 275) -> curve right -> to (455, 275)) */}
+            <path
+              d="M 275 145 L 275 255 A 20 20 0 0 0 295 275 L 455 275"
+              fill="none"
+              stroke="#1e293b"
+              strokeWidth="14"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              opacity="0.8"
+            />
+
+            {/* Path 2: Grid -> Device (From (725, 145) down to (725, 275) -> curve left -> to (545, 275)) */}
+            <path
+              d="M 725 145 L 725 255 A 20 20 0 0 1 705 275 L 545 275"
+              fill="none"
+              stroke="#1e293b"
+              strokeWidth="14"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              opacity="0.8"
+            />
+
+            {/* Path 3: Battery <-> Device (From (275, 435) up to (275, 315) -> curve right -> to (455, 315)) */}
+            <path
+              d="M 275 435 L 275 335 A 20 20 0 0 1 295 315 L 455 315"
+              fill="none"
+              stroke="#1e293b"
+              strokeWidth="14"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              opacity="0.8"
+            />
+
+            {/* Path 4: Device -> Load (From (545, 315) right to (705, 315) -> curve down -> to (725, 435)) */}
+            <path
+              d="M 545 315 L 705 315 A 20 20 0 0 1 725 335 L 725 435"
+              fill="none"
+              stroke="#1e293b"
+              strokeWidth="14"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              opacity="0.8"
+            />
+
+            {/* ========================================================= */}
+            {/* 2. ANIMATED GOLDEN GLOWING PARTICLES ALONG PATHS */}
+            {/* ========================================================= */}
+
+            {/* Animated Flow: PV -> Device */}
+            {pvW > 1 && (
+              <path
+                d="M 275 145 L 275 255 A 20 20 0 0 0 295 275 L 455 275"
+                fill="none"
+                stroke="#fbbf24"
+                strokeWidth="6.5"
+                strokeLinecap="round"
+                strokeDasharray="0.1 22"
+                filter="url(#glow-gold)"
+                className="flow-dots-forward"
+              />
+            )}
+
+            {/* Animated Flow: Battery <-> Device */}
+            {batteryDirection === 'discharging' && batteryPowerW > 1 && (
+              <path
+                d="M 275 435 L 275 335 A 20 20 0 0 1 295 315 L 455 315"
+                fill="none"
+                stroke="#fbbf24"
+                strokeWidth="6.5"
+                strokeLinecap="round"
+                strokeDasharray="0.1 22"
+                filter="url(#glow-gold)"
+                className="flow-dots-forward"
+              />
+            )}
+
+            {batteryDirection === 'charging' && batteryPowerW > 1 && (
+              <path
+                d="M 275 435 L 275 335 A 20 20 0 0 1 295 315 L 455 315"
+                fill="none"
+                stroke="#38bdf8"
+                strokeWidth="6.5"
+                strokeLinecap="round"
+                strokeDasharray="0.1 22"
+                filter="url(#glow-cyan)"
+                className="flow-dots-backward"
+              />
+            )}
+
+            {/* Animated Flow: Device -> Load */}
+            {loadW > 1 && (
+              <path
+                d="M 545 315 L 705 315 A 20 20 0 0 1 725 335 L 725 435"
+                fill="none"
+                stroke="#fbbf24"
+                strokeWidth="6.5"
+                strokeLinecap="round"
+                strokeDasharray="0.1 22"
+                filter="url(#glow-gold)"
+                className="flow-dots-forward"
+              />
+            )}
+
+            {/* Animated Flow: Grid -> Device (Active only when Grid power > 0) */}
+            {gridW > 1 && (
+              <path
+                d="M 725 145 L 725 255 A 20 20 0 0 1 705 275 L 545 275"
+                fill="none"
+                stroke="#fbbf24"
+                strokeWidth="6.5"
+                strokeLinecap="round"
+                strokeDasharray="0.1 22"
+                filter="url(#glow-gold)"
+                className="flow-dots-forward"
+              />
+            )}
+
+            {/* ========================================================= */}
+            {/* 3. WATTAGE LABELS (Matching typography & placement in image) */}
+            {/* ========================================================= */}
+            
+            {/* PV Output Power: e.g. "24.3W" in bright cyan over the horizontal pipe */}
+            <g transform="translate(345, 252)">
+              <text
+                textAnchor="middle"
+                className="font-mono font-bold select-none cursor-pointer"
+                fill="#38bdf8"
+                fontSize="17"
+                letterSpacing="0.5"
+                filter="drop-shadow(0 0 6px rgba(56,189,248,0.6))"
+                onClick={() => setSelectedNode('pv')}
+              >
+                {pvW.toFixed(1)}W
+              </text>
+            </g>
+
+            {/* Battery Capacity %: e.g. "44%" or "68%" to the right of battery */}
+            <g transform="translate(355, 470)">
+              <text
+                textAnchor="start"
+                className="font-mono font-bold select-none cursor-pointer"
+                fill="#38bdf8"
+                fontSize="17"
+                letterSpacing="0.5"
+                filter="drop-shadow(0 0 6px rgba(56,189,248,0.6))"
+                onClick={() => setSelectedNode('battery')}
+              >
+                {batSoc.toFixed(0)}%
+              </text>
+            </g>
+
+            {/* Load Power: e.g. "151W" under/over the horizontal pipe to Load */}
+            <g transform="translate(650, 355)">
+              <text
+                textAnchor="middle"
+                className="font-mono font-bold select-none cursor-pointer"
+                fill="#38bdf8"
+                fontSize="17"
+                letterSpacing="0.5"
+                filter="drop-shadow(0 0 6px rgba(56,189,248,0.6))"
+                onClick={() => setSelectedNode('load')}
+              >
+                {loadW.toFixed(0)}W
+              </text>
+            </g>
+
+            {/* Grid Status text if active or idle */}
+            {gridW > 0 && (
+              <g transform="translate(640, 252)">
+                <text
+                  textAnchor="middle"
+                  className="font-mono font-bold select-none cursor-pointer"
+                  fill="#38bdf8"
+                  fontSize="16"
+                  filter="drop-shadow(0 0 6px rgba(56,189,248,0.6))"
+                >
+                  {gridW.toFixed(0)}W
+                </text>
+              </g>
+            )}
+
+            {/* ========================================================= */}
+            {/* 4. ISOMETRIC 3D PEDESTALS & NODE GRAPHICS */}
+            {/* ========================================================= */}
+
+            {/* --- NODE 1: PV (Top Left at 275, 115) --- */}
+            <g
+              transform="translate(275, 115)"
+              className="cursor-pointer transition-all duration-300 hover:scale-105"
+              onClick={() => setSelectedNode('pv')}
+            >
+              {/* Cyan ambient aura */}
+              <ellipse cx="0" cy="15" rx="55" ry="25" fill="#38bdf8" opacity="0.2" filter="url(#pedestal-blur)" />
+
+              {/* 3D Platform Bottom Facet */}
+              <polygon
+                points="-52,0 0,22 52,0 52,10 0,32 -52,10"
+                fill="#0f172a"
+                stroke="#1e293b"
+                strokeWidth="1.5"
+              />
+
+              {/* 3D Platform Top Diamond */}
+              <polygon
+                points="0,-22 52,0 0,22 -52,0"
+                fill="#1e293b"
+                stroke="#38bdf8"
+                strokeWidth="2"
+                strokeOpacity="0.8"
+                filter="drop-shadow(0 0 8px rgba(56,189,248,0.4))"
+              />
+
+              {/* Inner Diamond Glow Ring */}
+              <polygon
+                points="0,-15 36,0 0,15 -36,0"
+                fill="#0f172a"
+                stroke="#7dd3fc"
+                strokeWidth="1.2"
+                strokeOpacity="0.9"
+              />
+
+              {/* Solar Panel 3D Icon Graphic */}
+              <g transform="translate(0, -32)">
+                {/* Solar Panel Frame */}
+                <polygon
+                  points="-24,-14 24,-14 30,10 -30,10"
+                  fill="#0284c7"
+                  stroke="#e0f2fe"
+                  strokeWidth="1.5"
+                />
+                {/* Solar Cell Grid Lines */}
+                <line x1="-12" y1="-14" x2="-15" y2="10" stroke="#bae6fd" strokeWidth="1" />
+                <line x1="0" y1="-14" x2="0" y2="10" stroke="#bae6fd" strokeWidth="1" />
+                <line x1="12" y1="-14" x2="15" y2="10" stroke="#bae6fd" strokeWidth="1" />
+                <line x1="-27" y1="-2" x2="27" y2="-2" stroke="#bae6fd" strokeWidth="1" />
+                {/* Stand */}
+                <polygon points="-5,10 5,10 2,20 -2,20" fill="#cbd5e1" />
+              </g>
+
+              {/* Label "PV" */}
+              <text
+                y="52"
+                textAnchor="middle"
+                className="font-sans font-bold select-none text-sm"
+                fill="#ffffff"
+                fontSize="15"
+                letterSpacing="0.5"
+              >
+                PV
+              </text>
+            </g>
+
+
+            {/* --- NODE 2: GRID (Top Right at 725, 115) --- */}
+            <g
+              transform="translate(725, 115)"
+              className="cursor-pointer transition-all duration-300 hover:scale-105"
+              onClick={() => setSelectedNode('grid')}
+            >
+              {/* Standby/Dimmed Aura or Active Aura */}
+              <ellipse
+                cx="0"
+                cy="15"
+                rx="55"
+                ry="25"
+                fill={gridW > 0 ? "#38bdf8" : "#334155"}
+                opacity={gridW > 0 ? "0.2" : "0.08"}
+                filter="url(#pedestal-blur)"
+              />
+
+              {/* 3D Platform Bottom Facet */}
+              <polygon
+                points="-52,0 0,22 52,0 52,10 0,32 -52,10"
+                fill="#0f172a"
+                stroke="#1e293b"
+                strokeWidth="1.5"
+              />
+
+              {/* 3D Platform Top Diamond */}
+              <polygon
+                points="0,-22 52,0 0,22 -52,0"
+                fill="#1e293b"
+                stroke={gridW > 0 ? "#38bdf8" : "#475569"}
+                strokeWidth="2"
+                strokeOpacity={gridW > 0 ? "0.9" : "0.4"}
+              />
+
+              {/* Transmission Tower (Pylon) Graphic */}
+              <g transform="translate(0, -32)" opacity={gridW > 0 ? "1" : "0.35"}>
+                {/* Pylon Main Legs */}
+                <line x1="-16" y1="16" x2="-4" y2="-22" stroke="#94a3b8" strokeWidth="1.8" />
+                <line x1="16" y1="16" x2="4" y2="-22" stroke="#94a3b8" strokeWidth="1.8" />
+                {/* Crossarms */}
+                <line x1="-22" y1="-14" x2="22" y2="-14" stroke="#94a3b8" strokeWidth="1.8" />
+                <line x1="-18" y1="-2" x2="18" y2="-2" stroke="#94a3b8" strokeWidth="1.8" />
+                {/* Braces */}
+                <line x1="-14" y1="8" x2="14" y2="8" stroke="#94a3b8" strokeWidth="1.2" />
+                <line x1="-14" y1="8" x2="0" y2="-2" stroke="#94a3b8" strokeWidth="1.2" />
+                <line x1="14" y1="8" x2="0" y2="-2" stroke="#94a3b8" strokeWidth="1.2" />
+                <line x1="-10" y1="-2" x2="0" y2="-14" stroke="#94a3b8" strokeWidth="1.2" />
+                <line x1="10" y1="-2" x2="0" y2="-14" stroke="#94a3b8" strokeWidth="1.2" />
+              </g>
+
+              {/* Label "Grid" */}
+              <text
+                y="52"
+                textAnchor="middle"
+                className="font-sans font-bold select-none text-sm"
+                fill="#94a3b8"
+                fontSize="15"
+                letterSpacing="0.5"
+              >
+                Grid
+              </text>
+            </g>
+
+
+            {/* --- NODE 3: DEVICE (Center Inverter at 500, 295) --- */}
+            <g
+              transform="translate(500, 295)"
+              className="cursor-pointer transition-all duration-300 hover:scale-105"
+              onClick={() => setSelectedNode('device')}
+            >
+              {/* Cyan ambient glowing aura */}
+              <ellipse cx="0" cy="18" rx="65" ry="30" fill="#38bdf8" opacity="0.35" filter="url(#pedestal-blur)" />
+
+              {/* 3D Platform Bottom Facet */}
+              <polygon
+                points="-58,0 0,25 58,0 58,12 0,37 -58,12"
+                fill="#0f172a"
+                stroke="#1e293b"
+                strokeWidth="1.5"
+              />
+
+              {/* 3D Platform Top Diamond */}
+              <polygon
+                points="0,-25 58,0 0,25 -58,0"
+                fill="#1e293b"
+                stroke="#38bdf8"
+                strokeWidth="2.5"
+                strokeOpacity="0.9"
+                filter="drop-shadow(0 0 12px rgba(56,189,248,0.6))"
+              />
+
+              {/* Inner Diamond Glow Ring */}
+              <polygon
+                points="0,-18 42,0 0,18 -42,0"
+                fill="#0f172a"
+                stroke="#e0f2fe"
+                strokeWidth="1.5"
+              />
+
+              {/* Hybrid Inverter Box Graphic (Cyan box with LCD screen '- / ~') */}
+              <g transform="translate(0, -36)">
+                {/* Inverter body */}
+                <rect
+                  x="-20"
+                  y="-22"
+                  width="40"
+                  height="44"
+                  rx="6"
+                  fill="url(#inverter-blue)"
+                  stroke="#e0f2fe"
+                  strokeWidth="1.5"
+                  filter="drop-shadow(0 0 10px rgba(56,189,248,0.5))"
+                />
+                {/* LCD Display */}
+                <rect
+                  x="-13"
+                  y="-14"
+                  width="26"
+                  height="22"
+                  rx="3"
+                  fill="#082f49"
+                  stroke="#7dd3fc"
+                  strokeWidth="1"
+                />
+                {/* Display text: "-/~" */}
+                <text
+                  x="0"
+                  y="2"
+                  textAnchor="middle"
+                  className="font-mono font-black"
+                  fill="#38bdf8"
+                  fontSize="12"
+                >
+                  -/~
+                </text>
+                {/* Bottom Status LEDs */}
+                <circle cx="-8" cy="14" r="1.8" fill="#4ade80" />
+                <circle cx="0" cy="14" r="1.8" fill="#38bdf8" />
+                <circle cx="8" cy="14" r="1.8" fill="#facc15" />
+              </g>
+
+              {/* Label "Device" */}
+              <text
+                y="58"
+                textAnchor="middle"
+                className="font-sans font-bold select-none text-sm"
+                fill="#ffffff"
+                fontSize="15"
+                letterSpacing="0.5"
+              >
+                Device
+              </text>
+            </g>
+
+
+            {/* --- NODE 4: BATTERY (Bottom Left at 275, 475) --- */}
+            <g
+              transform="translate(275, 475)"
+              className="cursor-pointer transition-all duration-300 hover:scale-105"
+              onClick={() => setSelectedNode('battery')}
+            >
+              {/* Ambient Aura */}
+              <ellipse cx="0" cy="15" rx="55" ry="25" fill="#38bdf8" opacity="0.25" filter="url(#pedestal-blur)" />
+
+              {/* 3D Platform Bottom Facet */}
+              <polygon
+                points="-52,0 0,22 52,0 52,10 0,32 -52,10"
+                fill="#0f172a"
+                stroke="#1e293b"
+                strokeWidth="1.5"
+              />
+
+              {/* 3D Platform Top Diamond */}
+              <polygon
+                points="0,-22 52,0 0,22 -52,0"
+                fill="#1e293b"
+                stroke="#38bdf8"
+                strokeWidth="2"
+                strokeOpacity="0.8"
+                filter="drop-shadow(0 0 8px rgba(56,189,248,0.4))"
+              />
+
+              {/* Inner Ring */}
+              <polygon
+                points="0,-15 36,0 0,15 -36,0"
+                fill="#0f172a"
+                stroke="#7dd3fc"
+                strokeWidth="1.2"
+              />
+
+              {/* Battery Graphic (Cyan Frame with glowing charge bars) */}
+              <g transform="translate(0, -30)">
+                {/* Battery Top Terminal */}
+                <rect x="-6" y="-23" width="12" height="4" rx="1.5" fill="#38bdf8" />
+                {/* Battery Outer Frame */}
+                <rect
+                  x="-22"
+                  y="-19"
+                  width="44"
+                  height="36"
+                  rx="5"
+                  fill="#03243a"
+                  stroke="#38bdf8"
+                  strokeWidth="2"
+                />
+                {/* Horizontal Charging Bars */}
+                <rect x="-16" y="8" width="32" height="4" rx="1" fill="#38bdf8" />
+                <rect x="-16" y="0" width="32" height="4" rx="1" fill="#38bdf8" />
+                <rect
+                  x="-16"
+                  y="-8"
+                  width="32"
+                  height="4"
+                  rx="1"
+                  fill={batSoc > 50 ? "#38bdf8" : "#0f334a"}
+                />
+                <rect
+                  x="-16"
+                  y="-16"
+                  width="32"
+                  height="4"
+                  rx="1"
+                  fill={batSoc > 75 ? "#38bdf8" : "#0f334a"}
+                />
+              </g>
+
+              {/* Label "Battery" */}
+              <text
+                y="52"
+                textAnchor="middle"
+                className="font-sans font-bold select-none text-sm"
+                fill="#ffffff"
+                fontSize="15"
+                letterSpacing="0.5"
+              >
+                Battery
+              </text>
+            </g>
+
+
+            {/* --- NODE 5: LOAD (Bottom Right at 725, 475) --- */}
+            <g
+              transform="translate(725, 475)"
+              className="cursor-pointer transition-all duration-300 hover:scale-105"
+              onClick={() => setSelectedNode('load')}
+            >
+              {/* Ambient Aura */}
+              <ellipse cx="0" cy="15" rx="55" ry="25" fill="#38bdf8" opacity="0.25" filter="url(#pedestal-blur)" />
+
+              {/* 3D Platform Bottom Facet */}
+              <polygon
+                points="-52,0 0,22 52,0 52,10 0,32 -52,10"
+                fill="#0f172a"
+                stroke="#1e293b"
+                strokeWidth="1.5"
+              />
+
+              {/* 3D Platform Top Diamond */}
+              <polygon
+                points="0,-22 52,0 0,22 -52,0"
+                fill="#1e293b"
+                stroke="#38bdf8"
+                strokeWidth="2"
+                strokeOpacity="0.8"
+                filter="drop-shadow(0 0 8px rgba(56,189,248,0.4))"
+              />
+
+              {/* Inner Ring */}
+              <polygon
+                points="0,-15 36,0 0,15 -36,0"
+                fill="#0f172a"
+                stroke="#7dd3fc"
+                strokeWidth="1.2"
+              />
+
+              {/* House/Load Graphic with glowing windows */}
+              <g transform="translate(0, -32)">
+                {/* Pitched Roof */}
+                <polygon
+                  points="0,-22 24,-2 20,2 0,-14 -20,2 -24,-2"
+                  fill="#38bdf8"
+                  stroke="#e0f2fe"
+                  strokeWidth="1.5"
+                />
+                {/* House Walls */}
+                <polygon
+                  points="-18,2 18,2 18,18 -18,18"
+                  fill="#03243a"
+                  stroke="#38bdf8"
+                  strokeWidth="1.8"
+                />
+                {/* Windows & Door */}
+                <rect x="-12" y="6" width="6" height="6" rx="1" fill="#7dd3fc" />
+                <rect x="6" y="6" width="6" height="6" rx="1" fill="#7dd3fc" />
+                <rect x="-3" y="8" width="6" height="10" rx="1" fill="#e0f2fe" />
+              </g>
+
+              {/* Label "Load" */}
+              <text
+                y="52"
+                textAnchor="middle"
+                className="font-sans font-bold select-none text-sm"
+                fill="#ffffff"
+                fontSize="15"
+                letterSpacing="0.5"
+              >
+                Load
+              </text>
+            </g>
+
+          </svg>
+        </div>
+
+        {/* Legend / Status Overlay Bar on bottom of canvas */}
+        <div className="mt-4 pt-4 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-4 text-xs text-slate-300">
+          <div className="flex flex-wrap items-center gap-4">
+            <div className="flex items-center gap-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.8)] animate-ping" />
+              <span className="text-slate-400">Arus Daya Aktif:</span>
+              <strong className="text-amber-300 font-mono">
+                {batteryDirection === 'charging'
+                  ? `PV (${pvW}W) ➔ Inverter ➔ Beban (${loadW}W) + Cas Baterai (+${batteryPowerW.toFixed(0)}W)`
+                  : `PV (${pvW}W) + Baterai (${batteryPowerW.toFixed(0)}W) ➔ Beban Kolam (${loadW}W)`}
+              </strong>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3 text-[11px] text-slate-400">
+            <span className="flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full bg-cyan-400" />
+              Klik elemen diagram untuk rincian modul
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Selected Node Details Drawer or Quick Telemetry Grid */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        {/* PV Card */}
+        <div
+          onClick={() => setSelectedNode('pv')}
+          className={`p-5 rounded-2xl border transition-all cursor-pointer ${
+            selectedNode === 'pv'
+              ? 'bg-[#0f172a] border-amber-500/80 shadow-[0_0_20px_rgba(245,158,11,0.25)] ring-1 ring-amber-400'
+              : 'bg-[#0f172a]/90 backdrop-blur-md border-slate-800/90 hover:border-amber-500/40'
+          }`}
+        >
+          <div className="flex items-center justify-between text-slate-400 mb-2">
+            <span className="text-xs font-bold uppercase tracking-wider">Pembangkit PV</span>
+            <Sun className="w-4 h-4 text-amber-400" />
+          </div>
+          <div className="text-2xl font-black text-amber-400 font-mono">
+            {pvW.toFixed(1)} <span className="text-xs text-slate-400">W</span>
+          </div>
+          <div className="text-xs text-slate-400 mt-2 space-y-1">
+            <div className="flex justify-between">
+              <span>Status:</span>
+              <span className="text-emerald-400 font-semibold">{pvW > 0 ? 'Menghasilkan Listrik' : 'Standby / Malam'}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>Efisiensi PLTS:</span>
+              <span className="text-slate-200 font-mono">~98.2%</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Battery Card */}
+        <div
+          onClick={() => setSelectedNode('battery')}
+          className={`p-5 rounded-2xl border transition-all cursor-pointer ${
+            selectedNode === 'battery'
+              ? 'bg-[#0f172a] border-emerald-500/80 shadow-[0_0_20px_rgba(16,185,129,0.25)] ring-1 ring-emerald-400'
+              : 'bg-[#0f172a]/90 backdrop-blur-md border-slate-800/90 hover:border-emerald-500/40'
+          }`}
+        >
+          <div className="flex items-center justify-between text-slate-400 mb-2">
+            <span className="text-xs font-bold uppercase tracking-wider">Baterai LiFePO4</span>
+            <BatteryCharging className="w-4 h-4 text-emerald-400" />
+          </div>
+          <div className="text-2xl font-black text-emerald-400 font-mono">
+            {batSoc.toFixed(1)} <span className="text-xs text-slate-400">% SOC</span>
+          </div>
+          <div className="text-xs text-slate-400 mt-2 space-y-1">
+            <div className="flex justify-between">
+              <span>Arah Arus:</span>
+              <span className="text-cyan-300 font-semibold capitalize">
+                {batteryDirection === 'charging' ? 'Mengisi (Charge)' : 'Mengosongkan (Discharge)'}
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span>Daya Baterai:</span>
+              <span className="text-slate-200 font-mono">{batteryPowerW.toFixed(1)} W</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Inverter Card */}
+        <div
+          onClick={() => setSelectedNode('device')}
+          className={`p-5 rounded-2xl border transition-all cursor-pointer ${
+            selectedNode === 'device'
+              ? 'bg-[#0f172a] border-cyan-500/80 shadow-[0_0_20px_rgba(6,182,212,0.25)] ring-1 ring-cyan-400'
+              : 'bg-[#0f172a]/90 backdrop-blur-md border-slate-800/90 hover:border-cyan-500/40'
+          }`}
+        >
+          <div className="flex items-center justify-between text-slate-400 mb-2">
+            <span className="text-xs font-bold uppercase tracking-wider">Device (Inverter)</span>
+            <Cpu className="w-4 h-4 text-cyan-400" />
+          </div>
+          <div className="text-2xl font-black text-cyan-400 font-mono">
+            {rawVoltage} <span className="text-xs text-slate-400">VAC</span>
+          </div>
+          <div className="text-xs text-slate-400 mt-2 space-y-1">
+            <div className="flex justify-between">
+              <span>Frekuensi:</span>
+              <span className="text-slate-200 font-mono">{rawFreq} Hz</span>
+            </div>
+            <div className="flex justify-between">
+              <span>SN Device:</span>
+              <span className="text-cyan-300 font-mono text-[10px]">6513-I3000...</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Load Card */}
+        <div
+          onClick={() => setSelectedNode('load')}
+          className={`p-5 rounded-2xl border transition-all cursor-pointer ${
+            selectedNode === 'load'
+              ? 'bg-[#0f172a] border-blue-500/80 shadow-[0_0_20px_rgba(59,130,246,0.25)] ring-1 ring-blue-400'
+              : 'bg-[#0f172a]/90 backdrop-blur-md border-slate-800/90 hover:border-blue-500/40'
+          }`}
+        >
+          <div className="flex items-center justify-between text-slate-400 mb-2">
+            <span className="text-xs font-bold uppercase tracking-wider">Beban Kolam (Load)</span>
+            <Waves className="w-4 h-4 text-blue-400" />
+          </div>
+          <div className="text-2xl font-black text-blue-400 font-mono">
+            {loadW.toFixed(0)} <span className="text-xs text-slate-400">W</span>
+          </div>
+          <div className="text-xs text-slate-400 mt-2 space-y-1">
+            <div className="flex justify-between">
+              <span>Arus Konsumsi:</span>
+              <span className="text-slate-200 font-mono">{rawCurrent} A</span>
+            </div>
+            <div className="flex justify-between">
+              <span>Peralatan:</span>
+              <span className="text-blue-300 font-semibold">Aerator Kincir + IoT</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Raw JSON Payload Inspector */}
+      {showRawJson && (
+        <div className="bg-[#0f172a]/90 backdrop-blur-md border border-slate-800/90 rounded-2xl p-6 shadow-xl space-y-4">
+          <div className="flex items-center justify-between border-b border-slate-800/80 pb-3">
+            <div className="flex items-center gap-2">
+              <Code className="w-4 h-4 text-cyan-400" />
+              <h2 className="text-sm font-bold text-white">Payload Asli: action=webQueryDeviceEnergyFlowEs</h2>
+            </div>
+            <span className="text-xs text-slate-400 font-mono">http://api.dessmonitor.com/public/</span>
+          </div>
+
+          <pre className="p-4 bg-[#020617] rounded-xl text-xs font-mono text-cyan-300 overflow-x-auto max-h-80 border border-slate-800 shadow-inner">
+            {JSON.stringify(summary?.rawFlow || {
+              err: 0,
+              desc: "ERR_NONE",
+              dat: {
+                brand: 0,
+                status: 0,
+                date: rawDate,
+                pv_status: [{ par: "pv_output_power", val: (pvW / 1000).toFixed(4), unit: "kW", status: 1 }],
+                bt_status: [
+                  { par: "bt_battery_capacity", val: batSoc.toFixed(1), unit: "%", status: 1 },
+                  { par: "battery_active_power", val: (batteryPowerW / 1000).toFixed(4), status: batteryDirection === 'charging' ? 1 : -1 }
+                ],
+                bc_status: [{ par: "load_active_power", val: (loadW / 1000).toFixed(4), unit: "kW", status: -1 }],
+                gd_status: [{ par: "grid_active_power", val: (gridW / 1000).toFixed(4), status: gridW > 0 ? 1 : 0 }]
+              }
+            }, null, 2)}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+};
