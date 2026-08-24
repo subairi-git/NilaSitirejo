@@ -205,7 +205,7 @@ export const SensorDiagnostics: React.FC<SensorDiagnosticsProps> = ({ telemetry 
       <div className="bg-[#0f172a]/90 backdrop-blur-md border border-slate-800/90 rounded-2xl p-6 shadow-[0_4px_20px_-4px_rgba(0,0,0,0.5)] space-y-4">
         <div className="flex items-center gap-2 border-b border-slate-800/80 pb-3">
           <Wifi className="w-5 h-5 text-cyan-400" />
-          <h2 className="text-base font-bold text-white">Status Jaringan & Microcontroller (Node MCU / ESP32)</h2>
+          <h2 className="text-base font-bold text-white">Status Jaringan dan Kontroller</h2>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">

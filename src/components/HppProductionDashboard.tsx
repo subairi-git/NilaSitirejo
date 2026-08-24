@@ -412,7 +412,7 @@ export const HppProductionDashboard: React.FC<HppProductionDashboardProps> = ({
             </span>
           </div>
           <h1 className="text-2xl font-black text-white tracking-tight">
-            Dashboard Kalkulasi HPP & Pencatatan Pakan Harian
+            Kalkulasi HPP & Pencatatan Pakan Harian
           </h1>
           <p className="text-xs text-slate-400 max-w-3xl leading-relaxed">
             Hitung biaya per kg dan margin keuntungan budidaya ikan nila secara presisi. Meliputi pakan, benih, energi mandiri PLTS vs PLN, vitamin/probiotik bioflok, tenaga kerja, serta penyusutan kolam.

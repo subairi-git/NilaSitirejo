@@ -26,7 +26,8 @@ import {
   Globe,
   Wifi,
   Database,
-  Gauge
+  Gauge,
+  Wrench
 } from 'lucide-react';
 import { User, TelemetryData, MqttAck, EspDeviceInfo } from '../types';
 
@@ -336,7 +337,11 @@ export const DeviceCommandsModal: React.FC<DeviceCommandsModalProps> = ({ user, 
         <div className="space-y-1.5">
           <div className="flex flex-wrap items-center gap-2">
             <span className="px-3 py-1 rounded-full text-xs font-bold bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 flex items-center gap-1.5 shadow-[0_0_10px_rgba(6,182,212,0.2)]">
-              <Terminal className="w-3.5 h-3.5" /> Remote MQTT Command & Calibration Center
+              <span className="relative inline-flex items-center justify-center shrink-0">
+                <Settings className="w-3.5 h-3.5 text-cyan-400" />
+                <Wrench className="w-2.5 h-2.5 absolute -bottom-0.5 -right-0.5 text-cyan-300" />
+              </span>
+              Remote MQTT Command & Calibration Center
             </span>
             <span className="px-2.5 py-0.5 rounded-full text-[11px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
               Protocol v2.0

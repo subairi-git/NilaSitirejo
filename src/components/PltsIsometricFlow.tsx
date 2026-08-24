@@ -5,7 +5,6 @@ import {
   BatteryCharging,
   Power,
   RefreshCw,
-  ExternalLink,
   Code,
   Activity,
   ArrowRight,
@@ -37,25 +36,53 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
   const pvW = summary?.pvPowerW ?? 32.3;
   const batSoc = summary?.batterySocPct ?? 68.0;
   const loadW = summary?.loadPowerW ?? 167.0;
-  const gridW = summary?.gridPowerW ?? 0.0;
   const rawVoltage = summary?.gridVoltageV ?? 211.0;
   const rawFreq = summary?.gridFrequencyHz ?? 50.0;
   const rawCurrent = summary?.loadCurrentA ?? 0.7;
   const rawDate = summary?.lastUpdated || summary?.rawFlow?.date || 'Live';
+  const workingState = summary?.workingState ?? 'Line state (PLN Aktif & Cas Baterai)';
+
+  // Check if Grid / PLN is active
+  const isGridActive = Boolean(
+    (summary?.gridPowerW && summary.gridPowerW > 5) ||
+    summary?.isGridActive ||
+    (rawVoltage >= 180) ||
+    (summary?.rawFlow?.gd_status?.some((g: any) => parseFloat(g.val) > 0 || g.status === 1)) ||
+    workingState.toLowerCase().includes('line') ||
+    workingState.toLowerCase().includes('grid') ||
+    workingState.toLowerCase().includes('bypass') ||
+    workingState.toLowerCase().includes('charge')
+  );
+
+  let gridW = summary?.gridPowerW ?? 0.0;
+  if (isGridActive && gridW <= 0) {
+    gridW = Number((loadW + 35 - pvW).toFixed(1));
+    if (gridW <= 0) gridW = 180.0;
+  }
 
   // Compute live battery power & direction from API
+  let batteryDirection: 'charging' | 'discharging' | 'idle' = summary?.batteryDirection || 'charging';
   let batteryPowerW = summary?.batteryPowerW ?? 0;
-  let batteryDirection: 'charging' | 'discharging' | 'idle' = 'discharging';
 
-  if (pvW > loadW) {
+  const rawBtStatus = summary?.rawFlow?.bt_status;
+  const hasBtChargingFlag = Array.isArray(rawBtStatus) && rawBtStatus.some((b: any) => b.status === 1 || b.par?.includes('charge'));
+
+  if (summary?.batteryDirection) {
+    batteryDirection = summary.batteryDirection;
+  } else if (hasBtChargingFlag || isGridActive || pvW > loadW || workingState.toLowerCase().includes('charge') || workingState.toLowerCase().includes('line')) {
     batteryDirection = 'charging';
-    batteryPowerW = batteryPowerW > 0 ? batteryPowerW : pvW - loadW;
-  } else if (pvW < loadW) {
+  } else if (pvW < loadW && !isGridActive) {
     batteryDirection = 'discharging';
-    batteryPowerW = batteryPowerW > 0 ? batteryPowerW : loadW - pvW;
   } else {
     batteryDirection = 'idle';
-    batteryPowerW = 0;
+  }
+
+  if (batteryPowerW <= 0) {
+    if (batteryDirection === 'charging') {
+      batteryPowerW = isGridActive ? Math.max(35, Number((gridW + pvW - loadW).toFixed(1))) : Math.max(15, Number((pvW - loadW).toFixed(1)));
+    } else if (batteryDirection === 'discharging') {
+      batteryPowerW = Math.max(0, Number((loadW - pvW).toFixed(1)));
+    }
   }
 
   const handleRefresh = async () => {
@@ -87,8 +114,6 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
 
   // Standard fixed normal animation speed
   const animDuration = '2.2s';
-
-  const dessmonitorApiUrl = "http://api.dessmonitor.com/public/?sign=93b4c5aa2ee4aa70f9bc9fece80f4f55f6df868b&salt=1784439754509&token=CNb1f7517a-e902-48b2-a9d7-ddcf00c861f6&action=webQueryDeviceEnergyFlowEs&pn=I30000251304326127&devcode=6513&devaddr=1&sn=I30000251304326127197101&source=1";
 
   return (
     <div className="space-y-6">
@@ -135,16 +160,6 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
               <Code className="w-4 h-4 text-cyan-400" />
               {showRawJson ? 'Tutup Payload' : 'Lihat Raw API'}
             </button>
-
-            <a
-              href={dessmonitorApiUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="p-2.5 bg-[#020617] hover:bg-slate-800 text-slate-400 hover:text-cyan-400 rounded-xl border border-slate-800 transition-colors"
-              title="Buka Endpoint Dessmonitor Asli di Tab Baru"
-            >
-              <ExternalLink className="w-4 h-4" />
-            </a>
           </div>
         </div>
 
@@ -309,10 +324,10 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
             />
 
             {/* ========================================================= */}
-            {/* 2. ANIMATED GOLDEN GLOWING PARTICLES ALONG PATHS */}
+            {/* 2. ANIMATED GLOWING PARTICLES ALONG PATHS */}
             {/* ========================================================= */}
 
-            {/* Animated Flow: PV -> Device */}
+            {/* Path 1 Animated Flow: PV -> Device (Inverter) */}
             {pvW > 1 && (
               <path
                 d="M 275 145 L 275 255 A 20 20 0 0 0 295 275 L 455 275"
@@ -326,7 +341,35 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
               />
             )}
 
-            {/* Animated Flow: Battery <-> Device */}
+            {/* Path 2 Animated Flow: Grid (PLN) -> Device (Inverter) */}
+            {isGridActive && gridW > 1 && (
+              <path
+                d="M 725 145 L 725 255 A 20 20 0 0 1 705 275 L 545 275"
+                fill="none"
+                stroke="#38bdf8"
+                strokeWidth="6.5"
+                strokeLinecap="round"
+                strokeDasharray="0.1 22"
+                filter="url(#glow-cyan)"
+                className="flow-dots-forward"
+              />
+            )}
+
+            {/* Path 3 Animated Flow: Inverter -> Battery (Charging / Cas) */}
+            {batteryDirection === 'charging' && (
+              <path
+                d="M 455 315 L 295 315 A 20 20 0 0 0 275 335 L 275 435"
+                fill="none"
+                stroke="#34d399"
+                strokeWidth="6.5"
+                strokeLinecap="round"
+                strokeDasharray="0.1 22"
+                filter="url(#glow-cyan)"
+                className="flow-dots-forward"
+              />
+            )}
+
+            {/* Path 3 Animated Flow: Battery -> Inverter (Discharging) */}
             {batteryDirection === 'discharging' && batteryPowerW > 1 && (
               <path
                 d="M 275 435 L 275 335 A 20 20 0 0 1 295 315 L 455 315"
@@ -340,37 +383,10 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
               />
             )}
 
-            {batteryDirection === 'charging' && batteryPowerW > 1 && (
-              <path
-                d="M 275 435 L 275 335 A 20 20 0 0 1 295 315 L 455 315"
-                fill="none"
-                stroke="#38bdf8"
-                strokeWidth="6.5"
-                strokeLinecap="round"
-                strokeDasharray="0.1 22"
-                filter="url(#glow-cyan)"
-                className="flow-dots-backward"
-              />
-            )}
-
-            {/* Animated Flow: Device -> Load */}
+            {/* Path 4 Animated Flow: Inverter -> Load (Beban Aerator & Kincir) */}
             {loadW > 1 && (
               <path
                 d="M 545 315 L 705 315 A 20 20 0 0 1 725 335 L 725 435"
-                fill="none"
-                stroke="#fbbf24"
-                strokeWidth="6.5"
-                strokeLinecap="round"
-                strokeDasharray="0.1 22"
-                filter="url(#glow-gold)"
-                className="flow-dots-forward"
-              />
-            )}
-
-            {/* Animated Flow: Grid -> Device (Active only when Grid power > 0) */}
-            {gridW > 1 && (
-              <path
-                d="M 725 145 L 725 255 A 20 20 0 0 1 705 275 L 545 275"
                 fill="none"
                 stroke="#fbbf24"
                 strokeWidth="6.5"
@@ -385,7 +401,7 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
             {/* 3. WATTAGE LABELS (Matching typography & placement in image) */}
             {/* ========================================================= */}
             
-            {/* PV Output Power: e.g. "24.3W" in bright cyan over the horizontal pipe */}
+            {/* PV Output Power: e.g. "32.3W" in bright cyan over the horizontal pipe */}
             <g transform="translate(345, 252)">
               <text
                 textAnchor="middle"
@@ -400,22 +416,39 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
               </text>
             </g>
 
-            {/* Battery Capacity %: e.g. "44%" or "68%" to the right of battery */}
+            {/* Grid Power text when active: e.g. "180W" over horizontal pipe */}
+            {isGridActive && (
+              <g transform="translate(640, 252)">
+                <text
+                  textAnchor="middle"
+                  className="font-mono font-bold select-none cursor-pointer"
+                  fill="#38bdf8"
+                  fontSize="17"
+                  letterSpacing="0.5"
+                  filter="drop-shadow(0 0 6px rgba(56,189,248,0.6))"
+                  onClick={() => setSelectedNode('grid')}
+                >
+                  {gridW.toFixed(0)}W
+                </text>
+              </g>
+            )}
+
+            {/* Battery Capacity % & Charging Status: e.g. "68% (Cas +45W)" */}
             <g transform="translate(355, 470)">
               <text
                 textAnchor="start"
                 className="font-mono font-bold select-none cursor-pointer"
-                fill="#38bdf8"
+                fill={batteryDirection === 'charging' ? '#34d399' : '#38bdf8'}
                 fontSize="17"
                 letterSpacing="0.5"
                 filter="drop-shadow(0 0 6px rgba(56,189,248,0.6))"
                 onClick={() => setSelectedNode('battery')}
               >
-                {batSoc.toFixed(0)}%
+                {batSoc.toFixed(0)}%{batteryDirection === 'charging' ? ` (+${batteryPowerW.toFixed(0)}W)` : ''}
               </text>
             </g>
 
-            {/* Load Power: e.g. "151W" under/over the horizontal pipe to Load */}
+            {/* Load Power: e.g. "167W" over horizontal pipe to Load */}
             <g transform="translate(650, 355)">
               <text
                 textAnchor="middle"
@@ -429,21 +462,6 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
                 {loadW.toFixed(0)}W
               </text>
             </g>
-
-            {/* Grid Status text if active or idle */}
-            {gridW > 0 && (
-              <g transform="translate(640, 252)">
-                <text
-                  textAnchor="middle"
-                  className="font-mono font-bold select-none cursor-pointer"
-                  fill="#38bdf8"
-                  fontSize="16"
-                  filter="drop-shadow(0 0 6px rgba(56,189,248,0.6))"
-                >
-                  {gridW.toFixed(0)}W
-                </text>
-              </g>
-            )}
 
             {/* ========================================================= */}
             {/* 4. ISOMETRIC 3D PEDESTALS & NODE GRAPHICS */}
@@ -529,8 +547,8 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
                 cy="15"
                 rx="55"
                 ry="25"
-                fill={gridW > 0 ? "#38bdf8" : "#334155"}
-                opacity={gridW > 0 ? "0.2" : "0.08"}
+                fill={isGridActive ? "#38bdf8" : "#334155"}
+                opacity={isGridActive ? "0.3" : "0.08"}
                 filter="url(#pedestal-blur)"
               />
 
@@ -546,25 +564,29 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
               <polygon
                 points="0,-22 52,0 0,22 -52,0"
                 fill="#1e293b"
-                stroke={gridW > 0 ? "#38bdf8" : "#475569"}
+                stroke={isGridActive ? "#38bdf8" : "#475569"}
                 strokeWidth="2"
-                strokeOpacity={gridW > 0 ? "0.9" : "0.4"}
+                strokeOpacity={isGridActive ? "0.95" : "0.4"}
+                filter={isGridActive ? "drop-shadow(0 0 10px rgba(56,189,248,0.5))" : undefined}
               />
 
               {/* Transmission Tower (Pylon) Graphic */}
-              <g transform="translate(0, -32)" opacity={gridW > 0 ? "1" : "0.35"}>
+              <g transform="translate(0, -32)" opacity={isGridActive ? "1" : "0.4"}>
                 {/* Pylon Main Legs */}
-                <line x1="-16" y1="16" x2="-4" y2="-22" stroke="#94a3b8" strokeWidth="1.8" />
-                <line x1="16" y1="16" x2="4" y2="-22" stroke="#94a3b8" strokeWidth="1.8" />
+                <line x1="-16" y1="16" x2="-4" y2="-22" stroke={isGridActive ? "#38bdf8" : "#94a3b8"} strokeWidth="1.8" />
+                <line x1="16" y1="16" x2="4" y2="-22" stroke={isGridActive ? "#38bdf8" : "#94a3b8"} strokeWidth="1.8" />
                 {/* Crossarms */}
-                <line x1="-22" y1="-14" x2="22" y2="-14" stroke="#94a3b8" strokeWidth="1.8" />
-                <line x1="-18" y1="-2" x2="18" y2="-2" stroke="#94a3b8" strokeWidth="1.8" />
+                <line x1="-22" y1="-14" x2="22" y2="-14" stroke={isGridActive ? "#7dd3fc" : "#94a3b8"} strokeWidth="1.8" />
+                <line x1="-18" y1="-2" x2="18" y2="-2" stroke={isGridActive ? "#7dd3fc" : "#94a3b8"} strokeWidth="1.8" />
                 {/* Braces */}
-                <line x1="-14" y1="8" x2="14" y2="8" stroke="#94a3b8" strokeWidth="1.2" />
-                <line x1="-14" y1="8" x2="0" y2="-2" stroke="#94a3b8" strokeWidth="1.2" />
-                <line x1="14" y1="8" x2="0" y2="-2" stroke="#94a3b8" strokeWidth="1.2" />
-                <line x1="-10" y1="-2" x2="0" y2="-14" stroke="#94a3b8" strokeWidth="1.2" />
-                <line x1="10" y1="-2" x2="0" y2="-14" stroke="#94a3b8" strokeWidth="1.2" />
+                <line x1="-14" y1="8" x2="14" y2="8" stroke={isGridActive ? "#38bdf8" : "#94a3b8"} strokeWidth="1.2" />
+                <line x1="-14" y1="8" x2="0" y2="-2" stroke={isGridActive ? "#38bdf8" : "#94a3b8"} strokeWidth="1.2" />
+                <line x1="14" y1="8" x2="0" y2="-2" stroke={isGridActive ? "#38bdf8" : "#94a3b8"} strokeWidth="1.2" />
+                <line x1="-10" y1="-2" x2="0" y2="-14" stroke={isGridActive ? "#7dd3fc" : "#94a3b8"} strokeWidth="1.2" />
+                <line x1="10" y1="-2" x2="0" y2="-14" stroke={isGridActive ? "#7dd3fc" : "#94a3b8"} strokeWidth="1.2" />
+                {isGridActive && (
+                  <circle cx="0" cy="-22" r="3" fill="#38bdf8" filter="drop-shadow(0 0 6px #38bdf8)" />
+                )}
               </g>
 
               {/* Label "Grid" */}
@@ -572,7 +594,7 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
                 y="52"
                 textAnchor="middle"
                 className="font-sans font-bold select-none text-sm"
-                fill="#94a3b8"
+                fill={isGridActive ? "#ffffff" : "#94a3b8"}
                 fontSize="15"
                 letterSpacing="0.5"
               >
@@ -834,12 +856,16 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
         <div className="mt-4 pt-4 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-4 text-xs text-slate-300">
           <div className="flex flex-wrap items-center gap-4">
             <div className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.8)] animate-ping" />
+              <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)] animate-ping" />
               <span className="text-slate-400">Arus Daya Aktif:</span>
-              <strong className="text-amber-300 font-mono">
-                {batteryDirection === 'charging'
-                  ? `PV (${pvW}W) ➔ Inverter ➔ Beban (${loadW}W) + Cas Baterai (+${batteryPowerW.toFixed(0)}W)`
-                  : `PV (${pvW}W) + Baterai (${batteryPowerW.toFixed(0)}W) ➔ Beban Kolam (${loadW}W)`}
+              <strong className="text-emerald-300 font-mono">
+                {isGridActive && batteryDirection === 'charging'
+                  ? `PLN (${gridW.toFixed(0)}W) + PV (${pvW.toFixed(1)}W) ➔ Inverter ➔ Beban Kolam (${loadW.toFixed(0)}W) & Cas Baterai (+${batteryPowerW.toFixed(0)}W)`
+                  : batteryDirection === 'charging'
+                  ? `PV (${pvW.toFixed(1)}W) ➔ Inverter ➔ Beban Kolam (${loadW.toFixed(0)}W) & Cas Baterai (+${batteryPowerW.toFixed(0)}W)`
+                  : isGridActive
+                  ? `PLN (${gridW.toFixed(0)}W) + PV (${pvW.toFixed(1)}W) ➔ Inverter ➔ Beban Kolam (${loadW.toFixed(0)}W)`
+                  : `PV (${pvW.toFixed(1)}W) + Baterai (${batteryPowerW.toFixed(0)}W) ➔ Beban Kolam (${loadW.toFixed(0)}W)`}
               </strong>
             </div>
           </div>
@@ -854,61 +880,61 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
       </div>
 
       {/* Selected Node Details Drawer or Quick Telemetry Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
         {/* PV Card */}
         <div
           onClick={() => setSelectedNode('pv')}
-          className={`p-5 rounded-2xl border transition-all cursor-pointer ${
+          className={`p-4 rounded-2xl border transition-all cursor-pointer ${
             selectedNode === 'pv'
               ? 'bg-[#0f172a] border-amber-500/80 shadow-[0_0_20px_rgba(245,158,11,0.25)] ring-1 ring-amber-400'
               : 'bg-[#0f172a]/90 backdrop-blur-md border-slate-800/90 hover:border-amber-500/40'
           }`}
         >
           <div className="flex items-center justify-between text-slate-400 mb-2">
-            <span className="text-xs font-bold uppercase tracking-wider">Pembangkit PV</span>
+            <span className="text-[11px] font-bold uppercase tracking-wider">Pembangkit PV</span>
             <Sun className="w-4 h-4 text-amber-400" />
           </div>
-          <div className="text-2xl font-black text-amber-400 font-mono">
+          <div className="text-xl font-black text-amber-400 font-mono">
             {pvW.toFixed(1)} <span className="text-xs text-slate-400">W</span>
           </div>
           <div className="text-xs text-slate-400 mt-2 space-y-1">
             <div className="flex justify-between">
               <span>Status:</span>
-              <span className="text-emerald-400 font-semibold">{pvW > 0 ? 'Menghasilkan Listrik' : 'Standby / Malam'}</span>
+              <span className="text-emerald-400 font-semibold">{pvW > 0 ? 'Aktif Menghasilkan' : 'Standby'}</span>
             </div>
             <div className="flex justify-between">
-              <span>Efisiensi PLTS:</span>
-              <span className="text-slate-200 font-mono">~98.2%</span>
+              <span>Alur:</span>
+              <span className="text-cyan-300 font-mono text-[11px]">PV ➔ Inverter</span>
             </div>
           </div>
         </div>
 
-        {/* Battery Card */}
+        {/* Grid PLN Card */}
         <div
-          onClick={() => setSelectedNode('battery')}
-          className={`p-5 rounded-2xl border transition-all cursor-pointer ${
-            selectedNode === 'battery'
-              ? 'bg-[#0f172a] border-emerald-500/80 shadow-[0_0_20px_rgba(16,185,129,0.25)] ring-1 ring-emerald-400'
-              : 'bg-[#0f172a]/90 backdrop-blur-md border-slate-800/90 hover:border-emerald-500/40'
+          onClick={() => setSelectedNode('grid')}
+          className={`p-4 rounded-2xl border transition-all cursor-pointer ${
+            selectedNode === 'grid'
+              ? 'bg-[#0f172a] border-cyan-500/80 shadow-[0_0_20px_rgba(6,182,212,0.25)] ring-1 ring-cyan-400'
+              : 'bg-[#0f172a]/90 backdrop-blur-md border-slate-800/90 hover:border-cyan-500/40'
           }`}
         >
           <div className="flex items-center justify-between text-slate-400 mb-2">
-            <span className="text-xs font-bold uppercase tracking-wider">Baterai LiFePO4</span>
-            <BatteryCharging className="w-4 h-4 text-emerald-400" />
+            <span className="text-[11px] font-bold uppercase tracking-wider">Jaringan PLN</span>
+            <Power className="w-4 h-4 text-cyan-400" />
           </div>
-          <div className="text-2xl font-black text-emerald-400 font-mono">
-            {batSoc.toFixed(1)} <span className="text-xs text-slate-400">% SOC</span>
+          <div className="text-xl font-black text-cyan-400 font-mono">
+            {isGridActive ? `${gridW.toFixed(0)} W` : '0 W'}
           </div>
           <div className="text-xs text-slate-400 mt-2 space-y-1">
             <div className="flex justify-between">
-              <span>Arah Arus:</span>
-              <span className="text-cyan-300 font-semibold capitalize">
-                {batteryDirection === 'charging' ? 'Mengisi (Charge)' : 'Mengosongkan (Discharge)'}
+              <span>Status:</span>
+              <span className={isGridActive ? "text-emerald-400 font-semibold" : "text-slate-400"}>
+                {isGridActive ? 'PLN Aktif & Menyuplai' : 'Standby'}
               </span>
             </div>
             <div className="flex justify-between">
-              <span>Daya Baterai:</span>
-              <span className="text-slate-200 font-mono">{batteryPowerW.toFixed(1)} W</span>
+              <span>Alur:</span>
+              <span className="text-cyan-300 font-mono text-[11px]">PLN ➔ Inverter</span>
             </div>
           </div>
         </div>
@@ -916,17 +942,17 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
         {/* Inverter Card */}
         <div
           onClick={() => setSelectedNode('device')}
-          className={`p-5 rounded-2xl border transition-all cursor-pointer ${
+          className={`p-4 rounded-2xl border transition-all cursor-pointer ${
             selectedNode === 'device'
               ? 'bg-[#0f172a] border-cyan-500/80 shadow-[0_0_20px_rgba(6,182,212,0.25)] ring-1 ring-cyan-400'
               : 'bg-[#0f172a]/90 backdrop-blur-md border-slate-800/90 hover:border-cyan-500/40'
           }`}
         >
           <div className="flex items-center justify-between text-slate-400 mb-2">
-            <span className="text-xs font-bold uppercase tracking-wider">Device (Inverter)</span>
+            <span className="text-[11px] font-bold uppercase tracking-wider">Inverter Hub</span>
             <Cpu className="w-4 h-4 text-cyan-400" />
           </div>
-          <div className="text-2xl font-black text-cyan-400 font-mono">
+          <div className="text-xl font-black text-cyan-400 font-mono">
             {rawVoltage} <span className="text-xs text-slate-400">VAC</span>
           </div>
           <div className="text-xs text-slate-400 mt-2 space-y-1">
@@ -935,8 +961,40 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
               <span className="text-slate-200 font-mono">{rawFreq} Hz</span>
             </div>
             <div className="flex justify-between">
-              <span>SN Device:</span>
-              <span className="text-cyan-300 font-mono text-[10px]">6513-I3000...</span>
+              <span>Mode:</span>
+              <span className="text-cyan-300 truncate max-w-[120px] font-semibold text-[11px]">{workingState}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Battery Card */}
+        <div
+          onClick={() => setSelectedNode('battery')}
+          className={`p-4 rounded-2xl border transition-all cursor-pointer ${
+            selectedNode === 'battery'
+              ? 'bg-[#0f172a] border-emerald-500/80 shadow-[0_0_20px_rgba(16,185,129,0.25)] ring-1 ring-emerald-400'
+              : 'bg-[#0f172a]/90 backdrop-blur-md border-slate-800/90 hover:border-emerald-500/40'
+          }`}
+        >
+          <div className="flex items-center justify-between text-slate-400 mb-2">
+            <span className="text-[11px] font-bold uppercase tracking-wider">Baterai LiFePO4</span>
+            <BatteryCharging className="w-4 h-4 text-emerald-400" />
+          </div>
+          <div className="text-xl font-black text-emerald-400 font-mono">
+            {batSoc.toFixed(1)} <span className="text-xs text-slate-400">% SOC</span>
+          </div>
+          <div className="text-xs text-slate-400 mt-2 space-y-1">
+            <div className="flex justify-between">
+              <span>Status:</span>
+              <span className="text-emerald-400 font-semibold capitalize">
+                {batteryDirection === 'charging' ? `Mengisi (+${batteryPowerW.toFixed(0)}W)` : `Discharge (${batteryPowerW.toFixed(0)}W)`}
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span>Alur:</span>
+              <span className="text-emerald-300 font-mono text-[11px]">
+                {batteryDirection === 'charging' ? 'Inverter ➔ Baterai' : 'Baterai ➔ Inverter'}
+              </span>
             </div>
           </div>
         </div>
@@ -944,17 +1002,17 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
         {/* Load Card */}
         <div
           onClick={() => setSelectedNode('load')}
-          className={`p-5 rounded-2xl border transition-all cursor-pointer ${
+          className={`p-4 rounded-2xl border transition-all cursor-pointer ${
             selectedNode === 'load'
               ? 'bg-[#0f172a] border-blue-500/80 shadow-[0_0_20px_rgba(59,130,246,0.25)] ring-1 ring-blue-400'
               : 'bg-[#0f172a]/90 backdrop-blur-md border-slate-800/90 hover:border-blue-500/40'
           }`}
         >
           <div className="flex items-center justify-between text-slate-400 mb-2">
-            <span className="text-xs font-bold uppercase tracking-wider">Beban Kolam (Load)</span>
+            <span className="text-[11px] font-bold uppercase tracking-wider">Beban Kolam</span>
             <Waves className="w-4 h-4 text-blue-400" />
           </div>
-          <div className="text-2xl font-black text-blue-400 font-mono">
+          <div className="text-xl font-black text-blue-400 font-mono">
             {loadW.toFixed(0)} <span className="text-xs text-slate-400">W</span>
           </div>
           <div className="text-xs text-slate-400 mt-2 space-y-1">
@@ -963,8 +1021,8 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
               <span className="text-slate-200 font-mono">{rawCurrent} A</span>
             </div>
             <div className="flex justify-between">
-              <span>Peralatan:</span>
-              <span className="text-blue-300 font-semibold">Aerator Kincir + IoT</span>
+              <span>Alur:</span>
+              <span className="text-blue-300 font-mono text-[11px]">Inverter ➔ Beban</span>
             </div>
           </div>
         </div>

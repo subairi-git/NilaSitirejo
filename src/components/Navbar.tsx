@@ -15,9 +15,17 @@ import {
   Settings, 
   Sparkles,
   Zap,
-  Calculator
+  Calculator,
+  Wrench
 } from 'lucide-react';
 import { TelemetryData, PltsSummary, User } from '../types';
+
+const GearWrenchIcon: React.FC<{ className?: string }> = ({ className = "w-4 h-4" }) => (
+  <span className="relative inline-flex items-center justify-center shrink-0">
+    <Settings className={className} />
+    <Wrench className="w-[60%] h-[60%] absolute -bottom-0.5 -right-0.5 text-cyan-300 drop-shadow-[0_1px_2px_rgba(0,0,0,0.9)]" />
+  </span>
+);
 
 interface NavbarProps {
   activeTab: string;
@@ -51,11 +59,10 @@ export const Navbar: React.FC<NavbarProps> = ({
   const navItems = [
     { id: 'overview', label: 'Monitoring Kolam', icon: Fish },
     { id: 'hpp', label: 'Kalkulator HPP & Pakan', icon: Calculator },
-    { id: 'plts-flow', label: 'Animasi Flow PLTS', icon: Zap },
     { id: 'plts', label: 'Dashboard PLTS', icon: SunMedium },
     { id: 'charts', label: 'Grafik & Riwayat', icon: Activity },
     { id: 'diagnostics', label: 'Diagnostik Sensor', icon: Cpu },
-    { id: 'control', label: 'Kontrol & Kalibrasi', icon: Terminal },
+    { id: 'control', label: 'Kontrol & Kalibrasi', icon: GearWrenchIcon },
     { id: 'logs', label: 'Data Log', icon: FileSpreadsheet },
     { id: 'guide', label: 'Panduan Nila', icon: BookOpen },
   ];
