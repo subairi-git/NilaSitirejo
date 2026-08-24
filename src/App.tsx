@@ -2,7 +2,6 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { Navbar } from './components/Navbar';
 import { WaterQualityOverview } from './components/WaterQualityOverview';
 import { PltsEnergyFlow } from './components/PltsEnergyFlow';
-import { PltsIsometricFlow } from './components/PltsIsometricFlow';
 import { TelemetryCharts } from './components/TelemetryCharts';
 import { SensorDiagnostics } from './components/SensorDiagnostics';
 import { DeviceCommandsModal } from './components/DeviceCommandsModal';
@@ -223,7 +222,7 @@ export default function App() {
             telemetry={telemetry}
             pltsSummary={pltsSummary}
             thresholds={thresholds}
-            onNavigateToPlts={() => setActiveTab('plts-flow')}
+            onNavigateToPlts={() => setActiveTab('plts')}
             onNavigateToDiagnostics={() => setActiveTab('diagnostics')}
             onNavigateToControl={() => setActiveTab('control')}
             onNavigateToHpp={() => setActiveTab('hpp')}
@@ -234,13 +233,6 @@ export default function App() {
           <HppProductionDashboard
             telemetry={telemetry}
             pltsSummary={pltsSummary}
-          />
-        )}
-
-        {activeTab === 'plts-flow' && (
-          <PltsIsometricFlow
-            summary={pltsSummary}
-            onRefresh={handleRefreshPlts}
           />
         )}
 
