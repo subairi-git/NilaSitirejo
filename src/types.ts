@@ -181,6 +181,8 @@ export interface PltsSummary {
   loadCurrentA: number;
   workingState: string;
   lastUpdated: string;
+  isGridActive?: boolean;
+  batteryDirection?: 'charging' | 'discharging' | 'idle';
   rawFlow?: PltsEnergyFlow;
   rawDevice?: PltsDeviceData;
   connected: boolean;
