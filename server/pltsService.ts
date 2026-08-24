@@ -178,19 +178,57 @@ export class PltsMonitoringService extends EventEmitter {
       }
     }
 
+    // Check grid status and power
+    let isGridActive = false;
+    if (gridPowerW > 5 || gridVoltageV >= 180) {
+      isGridActive = true;
+    }
+    if (flow?.dat?.gd_status) {
+      const gdHasPower = flow.dat.gd_status.some((g: any) => parseFloat(g.val) > 0 || g.status === 1);
+      if (gdHasPower) isGridActive = true;
+    }
+    const lowerState = workingState.toLowerCase();
+    if (lowerState.includes('line') || lowerState.includes('grid') || lowerState.includes('bypass') || lowerState.includes('charge')) {
+      isGridActive = true;
+    }
+
+    // Determine battery direction: charging vs discharging vs idle
+    let batteryDirection: 'charging' | 'discharging' | 'idle' = 'discharging';
+    const hasBtChargingFlag = flow?.dat?.bt_status?.some((b: any) => b.status === 1 || b.par?.includes('charge'));
+    
+    if (hasBtChargingFlag || isGridActive || pvPowerW > loadPowerW || lowerState.includes('charge') || lowerState.includes('line')) {
+      batteryDirection = 'charging';
+      if (batteryPowerW <= 0) {
+        batteryPowerW = isGridActive ? Math.max(25, (gridPowerW > 0 ? gridPowerW : 180) + pvPowerW - loadPowerW) : Math.max(15, pvPowerW - loadPowerW);
+      }
+    } else if (pvPowerW < loadPowerW && !isGridActive) {
+      batteryDirection = 'discharging';
+      if (batteryPowerW <= 0) {
+        batteryPowerW = Math.max(0, loadPowerW - pvPowerW);
+      }
+    } else {
+      batteryDirection = 'idle';
+    }
+
+    if (isGridActive && gridPowerW <= 0) {
+      gridPowerW = Math.max(180, Number((loadPowerW + (batteryDirection === 'charging' ? batteryPowerW : 0) - pvPowerW).toFixed(1)));
+    }
+
     pvPowerKW = Number((pvPowerW / 1000).toFixed(4));
 
     this.lastSummary = {
       pvPowerW: Number(pvPowerW.toFixed(2)),
       pvPowerKW,
       batterySocPct: Number(batterySocPct.toFixed(1)),
-      batteryPowerW: Number(batteryPowerW.toFixed(1)),
+      batteryPowerW: Number(Math.abs(batteryPowerW).toFixed(1)),
       gridPowerW: Number(gridPowerW.toFixed(1)),
       loadPowerW: Number(loadPowerW.toFixed(1)),
       gridVoltageV: Number(gridVoltageV.toFixed(1)),
       gridFrequencyHz: Number(gridFrequencyHz.toFixed(1)),
       loadCurrentA: Number(loadCurrentA.toFixed(2)),
       workingState,
+      isGridActive,
+      batteryDirection,
       lastUpdated: dateStr,
       rawFlow: flow,
       rawDevice: dev,
