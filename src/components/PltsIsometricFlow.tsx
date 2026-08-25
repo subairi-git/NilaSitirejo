@@ -106,27 +106,30 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
         ? 'discharging'
         : 'idle';
 
+  // Grid direction is status-driven, exactly like battery direction.
+  // Do NOT force status=idle merely because grid_active_power is 0/missing.
   const gridDirection: 'importing' | 'exporting' | 'idle' =
-    gridW <= 1
-      ? 'idle'
-      : gridStatus === 1
-        ? 'importing'
-        : gridStatus === -1
-          ? 'exporting'
-          : 'idle';
+    gridStatus === 1
+      ? 'importing'
+      : gridStatus === -1
+        ? 'exporting'
+        : 'idle';
 
   const pvActive = pvStatus === 1 && pvW > 1;
   const loadActive = loadStatus === -1 && loadW > 1;
   const batteryActive = batteryDirection !== 'idle';
   const batteryPowerAvailable = (summary as any)?.batteryPowerAvailable ?? Boolean(batteryPowerItem);
   const batteryPowerMeaningful = batteryPowerAvailable && batteryPowerW > 0.5;
-  const isGridActive = gridDirection !== 'idle' && gridW > 1;
+  const gridPowerMeaningful = gridW > 0.5;
+  const isGridActive = gridDirection !== 'idle';
   const isGridAvailable = (summary as any)?.isGridAvailable ?? rawVoltage >= 180;
 
   const activeSources: string[] = [];
   const activeSinks: string[] = [];
   if (pvActive) activeSources.push(`PV (${pvW.toFixed(1)}W)`);
-  if (gridDirection === 'importing' && isGridActive) activeSources.push(`PLN (${gridW.toFixed(0)}W)`);
+  if (gridDirection === 'importing' && isGridActive) activeSources.push(
+    gridPowerMeaningful ? `PLN (${gridW.toFixed(0)}W)` : 'PLN'
+  );
   if (batteryDirection === 'discharging' && batteryActive) activeSources.push(
     batteryPowerMeaningful ? `Baterai (${batteryPowerW.toFixed(0)}W)` : 'Baterai'
   );
@@ -134,7 +137,9 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
   if (batteryDirection === 'charging' && batteryActive) activeSinks.push(
     batteryPowerMeaningful ? `Cas Baterai (${batteryPowerW.toFixed(0)}W)` : 'Cas Baterai'
   );
-  if (gridDirection === 'exporting' && isGridActive) activeSinks.push(`Ekspor PLN (${gridW.toFixed(0)}W)`);
+  if (gridDirection === 'exporting' && isGridActive) activeSinks.push(
+    gridPowerMeaningful ? `Ekspor PLN (${gridW.toFixed(0)}W)` : 'Ekspor PLN'
+  );
 
   const activeFlowSummary = activeSources.length > 0
     ? `${activeSources.join(' + ')} ➔ Inverter${activeSinks.length ? ` ➔ ${activeSinks.join(' + ')}` : ''}`
@@ -476,7 +481,7 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
             </g>
 
             {/* Grid power is displayed only when the API reports actual import/export flow */}
-            {isGridActive && (
+            {isGridActive && gridPowerMeaningful && (
               <g transform="translate(640, 252)">
                 <text
                   textAnchor="middle"
@@ -980,14 +985,18 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
             <Power className="w-4 h-4 text-cyan-400" />
           </div>
           <div className="text-xl font-black text-cyan-400 font-mono">
-            {gridW.toFixed(0)} <span className="text-xs text-slate-400">W</span>
+            {gridPowerMeaningful
+              ? <>{gridW.toFixed(0)} <span className="text-xs text-slate-400">W</span></>
+              : isGridActive
+                ? <span className="text-base">AKTIF</span>
+                : <>0 <span className="text-xs text-slate-400">W</span></>}
           </div>
           <div className="text-xs text-slate-400 mt-2 space-y-1">
             <div className="flex justify-between">
               <span>Status:</span>
               <span className={isGridActive ? "text-emerald-400 font-semibold" : "text-slate-400"}>
                 {gridDirection === 'importing' && isGridActive
-                  ? 'PLN Menyuplai'
+                  ? gridPowerMeaningful ? 'PLN Menyuplai' : 'PLN Menyuplai • Daya tidak dilaporkan'
                   : gridDirection === 'exporting' && isGridActive
                     ? 'Ekspor ke PLN'
                     : isGridAvailable

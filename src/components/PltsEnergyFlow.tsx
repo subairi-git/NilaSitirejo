@@ -58,14 +58,13 @@ export const PltsEnergyFlow: React.FC<PltsEnergyFlowProps> = ({ summary, onRefre
   const gridPowerW = Math.max(0, Math.abs(summary?.gridPowerW ?? 0));
   const batteryPowerW = Math.max(0, Math.abs(summary?.batteryPowerW ?? 0));
 
+  // Direction comes from gd_status.status, not from gridPowerW magnitude.
   const gridDirection: 'importing' | 'exporting' | 'idle' =
-    gridPowerW <= 1
-      ? 'idle'
-      : gridStatus === 1
-        ? 'importing'
-        : gridStatus === -1
-          ? 'exporting'
-          : 'idle';
+    gridStatus === 1
+      ? 'importing'
+      : gridStatus === -1
+        ? 'exporting'
+        : 'idle';
   const batteryDirection: 'charging' | 'discharging' | 'idle' =
     batteryStatus === -1
       ? 'charging'
