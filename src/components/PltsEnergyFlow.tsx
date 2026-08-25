@@ -37,16 +37,21 @@ export const PltsEnergyFlow: React.FC<PltsEnergyFlowProps> = ({ summary, onRefre
   const rawGridItem = Array.isArray(flowDat?.gd_status)
     ? flowDat.gd_status.find((item: any) => item?.par === 'grid_active_power') ?? flowDat.gd_status[0]
     : undefined;
-  const rawBatteryPowerItem = Array.isArray(flowDat?.bt_status)
-    ? flowDat.bt_status.find((item: any) => item?.par === 'battery_active_power')
-    : undefined;
+  const batteryItems = Array.isArray(flowDat?.bt_status) ? flowDat.bt_status : [];
+  const rawBatteryPowerItem = batteryItems.find(
+    (item: any) => item?.par === 'battery_active_power'
+  );
+  const rawBatteryStatusItem =
+    batteryItems.find((item: any) => normalizeStatus(item?.status) !== 0) ??
+    batteryItems.find((item: any) => item?.status !== undefined) ??
+    batteryItems[0];
 
   const summaryFlowStatus = (summary as any)?.flowStatus;
   const gridStatus = rawGridItem
     ? normalizeStatus(rawGridItem.status)
     : normalizeStatus(summaryFlowStatus?.grid ?? 0);
-  const batteryStatus = rawBatteryPowerItem
-    ? normalizeStatus(rawBatteryPowerItem.status)
+  const batteryStatus = rawBatteryStatusItem
+    ? normalizeStatus(rawBatteryStatusItem.status)
     : normalizeStatus(summaryFlowStatus?.battery ?? 0);
 
   const gridPowerW = Math.max(0, Math.abs(summary?.gridPowerW ?? 0));
@@ -61,13 +66,13 @@ export const PltsEnergyFlow: React.FC<PltsEnergyFlowProps> = ({ summary, onRefre
           ? 'exporting'
           : 'idle';
   const batteryDirection: 'charging' | 'discharging' | 'idle' =
-    batteryPowerW <= 1
-      ? 'idle'
-      : batteryStatus === -1
-        ? 'charging'
-        : batteryStatus === 1
-          ? 'discharging'
-          : 'idle';
+    batteryStatus === -1
+      ? 'charging'
+      : batteryStatus === 1
+        ? 'discharging'
+        : 'idle';
+
+  const batteryPowerAvailable = (summary as any)?.batteryPowerAvailable ?? Boolean(rawBatteryPowerItem);
 
   // This is only an instantaneous PV-to-load ratio, not a claim about total daily self-sufficiency.
   const pvLoadRatio = loadW > 0 ? Math.round((flowPvW / loadW) * 100) : 0;
@@ -127,10 +132,10 @@ export const PltsEnergyFlow: React.FC<PltsEnergyFlowProps> = ({ summary, onRefre
           <div className="text-xs text-emerald-400 font-medium mt-2 flex items-center gap-1.5">
             <ShieldCheck className="w-3.5 h-3.5" />
             {batteryDirection === 'charging'
-              ? 'Status API: charging'
+              ? `Status API: charging (-1)${batteryPowerAvailable && batteryPowerW > 0.5 ? ` • ${batteryPowerW.toFixed(0)} W` : ''}`
               : batteryDirection === 'discharging'
-                ? 'Status API: discharging'
-                : 'Status aliran: idle'}
+                ? `Status API: discharging (1)${batteryPowerAvailable && batteryPowerW > 0.5 ? ` • ${batteryPowerW.toFixed(0)} W` : ''}`
+                : 'Status aliran: idle (0)'}
           </div>
         </div>
 

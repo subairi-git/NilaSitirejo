@@ -46,9 +46,12 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
 
   const findFlowItem = (items: any[] | undefined, par: string) =>
     Array.isArray(items) ? items.find((item: any) => item?.par === par) ?? items[0] : undefined;
+  const findExactFlowItem = (items: any[] | undefined, par: string) =>
+    Array.isArray(items) ? items.find((item: any) => item?.par === par) : undefined;
 
   const pvFlowItem = findFlowItem(flowDat?.pv_status, 'pv_output_power');
-  const batteryPowerItem = findFlowItem(flowDat?.bt_status, 'battery_active_power');
+  const batteryItems = Array.isArray(flowDat?.bt_status) ? flowDat.bt_status : [];
+  const batteryPowerItem = findExactFlowItem(batteryItems, 'battery_active_power');
   const gridFlowItem = findFlowItem(flowDat?.gd_status, 'grid_active_power');
   const loadFlowItem = findFlowItem(flowDat?.bc_status, 'load_active_power');
 
@@ -74,15 +77,20 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
   const rawDate = deviceUpdatedAt || flowUpdatedAt || 'Live';
   const workingState = summary?.workingState ?? 'Unknown';
 
-  // Prefer the raw status of the specific power item. This is important because
-  // bt_battery_capacity can have status=-1 even when battery_active_power is 0.
+  // Dessmonitor defines bt_status[j].status itself as battery flow direction.
+  // The direction may be carried by bt_battery_capacity (as on this device),
+  // so battery_active_power is NOT required to animate charging/discharging.
   const summaryFlowStatus = (summary as any)?.flowStatus;
+  const batteryStatusItem =
+    batteryItems.find((item: any) => normalizeStatus(item?.status) !== 0) ??
+    batteryItems.find((item: any) => item?.status !== undefined) ??
+    batteryItems[0];
 
   const pvStatus = pvFlowItem
     ? normalizeStatus(pvFlowItem.status)
     : normalizeStatus(summaryFlowStatus?.pv ?? (pvW > 1 ? 1 : 0));
-  const batteryStatus = batteryPowerItem
-    ? normalizeStatus(batteryPowerItem.status)
+  const batteryStatus = batteryStatusItem
+    ? normalizeStatus(batteryStatusItem.status)
     : normalizeStatus(summaryFlowStatus?.battery ?? 0);
   const gridStatus = gridFlowItem
     ? normalizeStatus(gridFlowItem.status)
@@ -92,13 +100,11 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
     : normalizeStatus(summaryFlowStatus?.load ?? (loadW > 1 ? -1 : 0));
 
   const batteryDirection: 'charging' | 'discharging' | 'idle' =
-    batteryPowerW <= 1
-      ? 'idle'
-      : batteryStatus === -1
-        ? 'charging'
-        : batteryStatus === 1
-          ? 'discharging'
-          : 'idle';
+    batteryStatus === -1
+      ? 'charging'
+      : batteryStatus === 1
+        ? 'discharging'
+        : 'idle';
 
   const gridDirection: 'importing' | 'exporting' | 'idle' =
     gridW <= 1
@@ -111,7 +117,9 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
 
   const pvActive = pvStatus === 1 && pvW > 1;
   const loadActive = loadStatus === -1 && loadW > 1;
-  const batteryActive = batteryDirection !== 'idle' && batteryPowerW > 1;
+  const batteryActive = batteryDirection !== 'idle';
+  const batteryPowerAvailable = (summary as any)?.batteryPowerAvailable ?? Boolean(batteryPowerItem);
+  const batteryPowerMeaningful = batteryPowerAvailable && batteryPowerW > 0.5;
   const isGridActive = gridDirection !== 'idle' && gridW > 1;
   const isGridAvailable = (summary as any)?.isGridAvailable ?? rawVoltage >= 180;
 
@@ -119,9 +127,13 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
   const activeSinks: string[] = [];
   if (pvActive) activeSources.push(`PV (${pvW.toFixed(1)}W)`);
   if (gridDirection === 'importing' && isGridActive) activeSources.push(`PLN (${gridW.toFixed(0)}W)`);
-  if (batteryDirection === 'discharging' && batteryActive) activeSources.push(`Baterai (${batteryPowerW.toFixed(0)}W)`);
+  if (batteryDirection === 'discharging' && batteryActive) activeSources.push(
+    batteryPowerMeaningful ? `Baterai (${batteryPowerW.toFixed(0)}W)` : 'Baterai'
+  );
   if (loadActive) activeSinks.push(`Beban Kolam (${loadW.toFixed(0)}W)`);
-  if (batteryDirection === 'charging' && batteryActive) activeSinks.push(`Cas Baterai (${batteryPowerW.toFixed(0)}W)`);
+  if (batteryDirection === 'charging' && batteryActive) activeSinks.push(
+    batteryPowerMeaningful ? `Cas Baterai (${batteryPowerW.toFixed(0)}W)` : 'Cas Baterai'
+  );
   if (gridDirection === 'exporting' && isGridActive) activeSinks.push(`Ekspor PLN (${gridW.toFixed(0)}W)`);
 
   const activeFlowSummary = activeSources.length > 0
@@ -491,7 +503,11 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
                 filter="drop-shadow(0 0 6px rgba(56,189,248,0.6))"
                 onClick={() => setSelectedNode('battery')}
               >
-                {batSoc.toFixed(0)}%{batteryDirection === 'charging' ? ` (+${batteryPowerW.toFixed(0)}W)` : batteryDirection === 'discharging' ? ` (-${batteryPowerW.toFixed(0)}W)` : ' (Idle)'}
+                {batSoc.toFixed(0)}%{batteryDirection === 'charging'
+                  ? batteryPowerMeaningful ? ` (+${batteryPowerW.toFixed(0)}W)` : ' (Cas)'
+                  : batteryDirection === 'discharging'
+                    ? batteryPowerMeaningful ? ` (-${batteryPowerW.toFixed(0)}W)` : ' (Discharge)'
+                    : ' (Idle)'}
               </text>
             </g>
 
@@ -1041,10 +1057,10 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
               <span>Status:</span>
               <span className="text-emerald-400 font-semibold capitalize">
                 {batteryDirection === 'charging' && batteryActive
-                  ? `Mengisi (+${batteryPowerW.toFixed(0)}W)`
+                  ? batteryPowerMeaningful ? `Mengisi (+${batteryPowerW.toFixed(0)}W)` : 'Mengisi (status API -1)'
                   : batteryDirection === 'discharging' && batteryActive
-                    ? `Discharge (${batteryPowerW.toFixed(0)}W)`
-                    : 'Idle (0W)'}
+                    ? batteryPowerMeaningful ? `Discharge (${batteryPowerW.toFixed(0)}W)` : 'Discharge (status API 1)'
+                    : 'Idle (status API 0)'}
               </span>
             </div>
             <div className="flex justify-between">
@@ -1121,7 +1137,10 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
                 dat: {
                   date: flowUpdatedAt,
                   pv_status: [{ par: 'pv_output_power', val: pvW, unit: 'W', status: pvStatus }],
-                  bt_status: [{ par: 'battery_active_power', val: batteryPowerW, unit: 'W', status: batteryStatus }],
+                  bt_status: [
+                    { par: 'bt_battery_capacity', val: batSoc, unit: '%', status: batteryStatus },
+                    ...(batteryPowerAvailable ? [{ par: 'battery_active_power', val: batteryPowerW, unit: 'W', status: batteryStatus }] : []),
+                  ],
                   gd_status: [{ par: 'grid_active_power', val: gridW, unit: 'W', status: gridStatus }],
                   bc_status: [{ par: 'load_active_power', val: loadW, unit: 'W', status: loadStatus }]
                 }
