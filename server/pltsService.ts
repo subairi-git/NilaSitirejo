@@ -458,10 +458,13 @@ export class PltsMonitoringService extends EventEmitter {
       error: undefined,
     };
 
-    const timeLabel = new Date().toISOString().substring(11, 19);
+    // Store PV and Load from the SAME energy-flow snapshot whenever available.
+    // This makes the comparison chart electrically meaningful instead of mixing
+    // querySPDeviceLastData PV with a different webQueryDeviceEnergyFlowEs timestamp.
+    const historyTimestamp = flowUpdatedAt ?? deviceUpdatedAt ?? new Date().toISOString();
     this.history.push({
-      timestamp: timeLabel,
-      pvPowerW: this.lastSummary.pvPowerW,
+      timestamp: historyTimestamp,
+      pvPowerW: flow?.dat ? this.lastSummary.flowPvPowerW : this.lastSummary.pvPowerW,
       batterySocPct: this.lastSummary.batterySocPct,
       batteryPowerW: this.lastSummary.batteryPowerW,
       loadPowerW: this.lastSummary.loadPowerW,
