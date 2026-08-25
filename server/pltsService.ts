@@ -219,8 +219,10 @@ export class PltsMonitoringService extends EventEmitter {
    *   bc_status: -1 consumption, 0 idle
    *
    * IMPORTANT:
-   * The status attached to bt_battery_capacity is not a power-flow direction
-   * for animation. Battery direction is read from battery_active_power only.
+   * bt_status[j].status is the battery energy-flow direction, regardless of
+   * which bt_status item carries it (for this device it can be
+   * bt_battery_capacity). Therefore status=-1 must animate Inverter -> Battery
+   * even when battery_active_power is absent or reports 0 W.
    */
   private parseLiveSummary(flow: any, dev: any) {
     const previous = this.lastSummary ?? {};
@@ -230,6 +232,8 @@ export class PltsMonitoringService extends EventEmitter {
     let batterySocPct = previous.batterySocPct ?? 0;
     let flowBatterySocPct: number | null = null;
     let batteryPowerW = 0;
+    let batteryPowerAvailable = false;
+    let batteryStatusSource: string | null = null;
     let gridPowerW = 0;
     let loadPowerW = 0;
 
@@ -343,14 +347,28 @@ export class PltsMonitoringService extends EventEmitter {
         }
       }
 
-      const batteryPowerItem = Array.isArray(dat.bt_status)
-        ? dat.bt_status.find((item: any) => item?.par === 'battery_active_power')
-        : undefined;
+      const batteryItems = Array.isArray(dat.bt_status) ? dat.bt_status : [];
+      const batteryPowerItem = batteryItems.find(
+        (item: any) => item?.par === 'battery_active_power'
+      );
+
+      // Dessmonitor defines bt_status[j].status as the BATTERY FLOW DIRECTION.
+      // On this protocol the direction can be attached to bt_battery_capacity,
+      // so do not require battery_active_power to determine charging/discharging.
+      const batteryDirectionItem =
+        batteryItems.find((item: any) => this.normalizeStatus(item?.status) !== 0) ??
+        batteryItems.find((item: any) => item?.status !== undefined) ??
+        batteryItems[0];
+
+      if (batteryDirectionItem) {
+        batteryStatus = this.normalizeStatus(batteryDirectionItem.status);
+        batteryStatusSource = String(batteryDirectionItem.par ?? 'bt_status');
+      }
+
       if (batteryPowerItem) {
-        // Some devices omit the unit when the value is zero. For this device
-        // the field is retained as W unless Dessmonitor explicitly supplies a unit.
+        // Power magnitude is optional and independent from the direction status.
         batteryPowerW = this.toWatts(batteryPowerItem, 'W');
-        batteryStatus = this.normalizeStatus(batteryPowerItem.status);
+        batteryPowerAvailable = true;
       }
 
       const gridItem = this.findFlowItem(dat.gd_status, 'grid_active_power');
@@ -371,7 +389,8 @@ export class PltsMonitoringService extends EventEmitter {
     // Never animate direction when actual measured power is effectively zero.
     if (flowPvPowerW <= 0.5 && flow?.dat) pvStatus = 0;
     if (!flow?.dat && pvPowerW <= 0.5) pvStatus = 0;
-    if (batteryPowerW <= 0.5) batteryStatus = 0;
+    // Do NOT force batteryStatus to idle from batteryPowerW. The Dessmonitor
+    // protocol can report direction on bt_battery_capacity without a power item.
     if (gridPowerW <= 0.5) gridStatus = 0;
     if (loadPowerW <= 0.5) loadStatus = 0;
 
@@ -408,6 +427,8 @@ export class PltsMonitoringService extends EventEmitter {
         ? null
         : Number(Math.max(0, Math.min(100, flowBatterySocPct)).toFixed(1)),
       batteryPowerW: Number(batteryPowerW.toFixed(1)),
+      batteryPowerAvailable,
+      batteryStatusSource,
       gridPowerW: Number(gridPowerW.toFixed(1)),
       loadPowerW: Number(loadPowerW.toFixed(1)),
       gridVoltageV: Number(gridVoltageV.toFixed(1)),
