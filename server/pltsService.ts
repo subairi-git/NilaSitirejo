@@ -389,9 +389,8 @@ export class PltsMonitoringService extends EventEmitter {
     // Never animate direction when actual measured power is effectively zero.
     if (flowPvPowerW <= 0.5 && flow?.dat) pvStatus = 0;
     if (!flow?.dat && pvPowerW <= 0.5) pvStatus = 0;
-    // Do NOT force batteryStatus to idle from batteryPowerW. The Dessmonitor
-    // protocol can report direction on bt_battery_capacity without a power item.
-    if (gridPowerW <= 0.5) gridStatus = 0;
+    // Do NOT force batteryStatus OR gridStatus to idle from their reported
+    // power magnitude. Direction is carried by Dessmonitor status.
     if (loadPowerW <= 0.5) loadStatus = 0;
 
     const batteryDirection: BatteryDirection =
@@ -410,7 +409,7 @@ export class PltsMonitoringService extends EventEmitter {
 
     // Voltage means PLN is physically present/available, not necessarily flowing.
     const isGridAvailable = gridVoltageV >= 180;
-    const isGridActive = gridStatus !== 0 && gridPowerW > 0.5;
+    const isGridActive = gridStatus !== 0;
 
     const pvPowerKW = pvPowerW / 1000;
     const lastUpdated =
