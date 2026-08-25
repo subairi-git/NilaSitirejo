@@ -9,10 +9,18 @@ export interface PltsHistoryPoint {
   gridPowerW: number;
 }
 
+type FlowStatus = -1 | 0 | 1;
+type BatteryDirection = 'charging' | 'discharging' | 'idle';
+type GridDirection = 'importing' | 'exporting' | 'idle';
+
 export class PltsMonitoringService extends EventEmitter {
-  private deviceDataUrl: string = 'https://web.dessmonitor.com/public/?sign=93b4c5aa2ee4aa70f9bc9fece80f4f55f6df868b&salt=1784439754509&token=CNb1f7517a-e902-48b2-a9d7-ddcf00c861f6&action=querySPDeviceLastData&source=1&devcode=6513&pn=I30000251304326127&devaddr=1&sn=I30000251304326127197101&i18n=en_US';
-  private energyFlowUrl: string = 'http://api.dessmonitor.com/public/?sign=93b4c5aa2ee4aa70f9bc9fece80f4f55f6df868b&salt=1784439754509&token=CNb1f7517a-e902-48b2-a9d7-ddcf00c861f6&action=webQueryDeviceEnergyFlowEs&pn=I30000251304326127&devcode=6513&devaddr=1&sn=I30000251304326127197101&source=1';
-  
+  private deviceDataUrl: string =
+    'https://web.dessmonitor.com/public/?sign=93b4c5aa2ee4aa70f9bc9fece80f4f55f6df868b&salt=1784439754509&token=CNb1f7517a-e902-48b2-a9d7-ddcf00c861f6&action=querySPDeviceLastData&source=1&devcode=6513&pn=I30000251304326127&devaddr=1&sn=I30000251304326127197101&i18n=en_US';
+
+  // Use HTTPS. This endpoint is the authoritative source for energy-flow direction.
+  private energyFlowUrl: string =
+    'https://api.dessmonitor.com/public/?sign=93b4c5aa2ee4aa70f9bc9fece80f4f55f6df868b&salt=1784439754509&token=CNb1f7517a-e902-48b2-a9d7-ddcf00c861f6&action=webQueryDeviceEnergyFlowEs&pn=I30000251304326127&devcode=6513&devaddr=1&sn=I30000251304326127197101&source=1';
+
   public lastDeviceData: any = null;
   public lastEnergyFlow: any = null;
   public lastSummary: any = null;
@@ -25,58 +33,137 @@ export class PltsMonitoringService extends EventEmitter {
   constructor() {
     super();
     this.initDefaultData();
-    this.startPolling(15000); // Poll every 15 seconds
+    this.startPolling(15000);
   }
 
+  /**
+   * Do not seed the dashboard with fabricated live power values.
+   * Before the first successful fetch every flow is idle/0 W.
+   */
   private initDefaultData() {
     this.lastSummary = {
-      pvPowerW: 54.72,
-      pvPowerKW: 0.0547,
-      batterySocPct: 80.0,
+      pvPowerW: 0,
+      pvPowerKW: 0,
+      batterySocPct: 0,
       batteryPowerW: 0,
       gridPowerW: 0,
-      loadPowerW: 167.0,
-      gridVoltageV: 211.0,
-      gridFrequencyHz: 50.0,
-      loadCurrentA: 0.7,
-      workingState: 'Inverted state (Aktif Menyuplai)',
+      loadPowerW: 0,
+      gridVoltageV: 0,
+      gridFrequencyHz: 0,
+      loadCurrentA: 0,
+      workingState: 'Menunggu data Dessmonitor',
       lastUpdated: new Date().toISOString(),
-      connected: true,
+      isGridActive: false,
+      isGridAvailable: false,
+      batteryDirection: 'idle' as BatteryDirection,
+      gridDirection: 'idle' as GridDirection,
+      flowStatus: {
+        pv: 0 as FlowStatus,
+        battery: 0 as FlowStatus,
+        grid: 0 as FlowStatus,
+        load: 0 as FlowStatus,
+      },
+      rawFlow: null,
+      rawDevice: null,
+      connected: false,
     };
+  }
 
-    // Pre-populate some baseline history
-    const now = Date.now();
-    for (let i = 12; i >= 0; i--) {
-      const time = new Date(now - i * 5 * 60 * 1000).toISOString().substring(11, 19);
-      this.history.push({
-        timestamp: time,
-        pvPowerW: Math.max(0, 55 + (Math.random() - 0.5) * 10),
-        batterySocPct: 80,
-        batteryPowerW: 0,
-        loadPowerW: 165 + (Math.random() - 0.5) * 15,
-        gridPowerW: 0,
-      });
+  private normalizeStatus(value: unknown): FlowStatus {
+    const status = Number(value);
+    if (status === 1) return 1;
+    if (status === -1) return -1;
+    return 0;
+  }
+
+  private findFlowItem(items: any, par: string): any | undefined {
+    if (!Array.isArray(items)) return undefined;
+    return items.find((item: any) => item?.par === par) ?? items[0];
+  }
+
+  /**
+   * Dessmonitor may return W or kW depending on device/protocol.
+   * Never multiply blindly by 1000: use the unit returned by the API.
+   */
+  private toWatts(item: any, fallbackUnit: string = 'W'): number {
+    if (!item) return 0;
+
+    const value = Number.parseFloat(String(item.val ?? ''));
+    if (!Number.isFinite(value)) return 0;
+
+    const unit = String(item.unit ?? fallbackUnit)
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, '');
+
+    if (unit === 'kw') return Math.abs(value * 1000);
+    if (unit === 'mw') return Math.abs(value * 1_000_000);
+    return Math.abs(value);
+  }
+
+  private toNumber(value: unknown, fallback = 0): number {
+    const parsed = Number.parseFloat(String(value ?? ''));
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+
+
+  private parseDeviceTimestamp(value: unknown): string | null {
+    const raw = String(value ?? '').trim();
+    if (!raw) return null;
+
+    const epoch = Number(raw);
+    if (Number.isFinite(epoch)) {
+      const ms = epoch > 1_000_000_000_000 ? epoch : epoch * 1000;
+      const date = new Date(ms);
+      if (!Number.isNaN(date.getTime())) return date.toISOString();
     }
+
+    const date = new Date(raw);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  }
+
+  private findDeviceItem(items: any, ids: string[], keywords: string[]): any | undefined {
+    if (!Array.isArray(items)) return undefined;
+
+    const normalizedIds = ids.map((id) => id.toLowerCase());
+    const normalizedKeywords = keywords.map((keyword) => keyword.toLowerCase());
+
+    return items.find((item: any) => {
+      const id = String(item?.id ?? '').toLowerCase();
+      const par = String(item?.par ?? '').toLowerCase();
+      return (
+        normalizedIds.includes(id) ||
+        normalizedKeywords.some((keyword) => id.includes(keyword) || par.includes(keyword))
+      );
+    });
   }
 
   public async fetchLivePltsData() {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 8000);
-
       const [resFlow, resDevice] = await Promise.allSettled([
-        fetch(this.energyFlowUrl, { signal: controller.signal, headers: { 'User-Agent': 'Mozilla/5.0' } }),
-        fetch(this.deviceDataUrl, { signal: controller.signal, headers: { 'User-Agent': 'Mozilla/5.0' } })
+        fetch(this.energyFlowUrl, {
+          signal: controller.signal,
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+        }),
+        fetch(this.deviceDataUrl, {
+          signal: controller.signal,
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+        }),
       ]);
-
-      clearTimeout(timeoutId);
 
       let flowData: any = null;
       let devData: any = null;
 
       if (resFlow.status === 'fulfilled' && resFlow.value.ok) {
         flowData = await resFlow.value.json();
-        this.lastEnergyFlow = flowData;
+        if (flowData?.err === 0 || flowData?.success === true || flowData?.dat) {
+          this.lastEnergyFlow = flowData;
+        } else {
+          flowData = null;
+        }
       }
 
       if (resDevice.status === 'fulfilled' && resDevice.value.ok) {
@@ -84,143 +171,243 @@ export class PltsMonitoringService extends EventEmitter {
         this.lastDeviceData = devData;
       }
 
-      if (flowData || devData) {
-        this.isConnected = true;
-        this.lastError = null;
-        this.lastFetchTime = Date.now();
-        this.parseAndSynthesizeSummary(flowData, devData);
-        this.emit('update', this.lastSummary);
-        return this.lastSummary;
-      } else {
+      if (!flowData && !devData) {
         throw new Error('Gagal menghubungi endpoint Dessmonitor');
       }
+
+      this.isConnected = true;
+      this.lastError = null;
+      this.lastFetchTime = Date.now();
+      this.parseLiveSummary(flowData, devData);
+      this.emit('update', this.lastSummary);
+      return this.lastSummary;
     } catch (err: any) {
       this.isConnected = false;
-      this.lastError = err.message || 'Timeout / Gagal mengambil data PLTS';
-      console.warn('[PLTS Service] Error fetching live data:', err.message);
+      this.lastError = err?.name === 'AbortError'
+        ? 'Timeout saat mengambil data Dessmonitor'
+        : err?.message || 'Gagal mengambil data PLTS';
+
+      this.lastSummary = {
+        ...this.lastSummary,
+        connected: false,
+        error: this.lastError,
+      };
+
+      console.warn('[PLTS Service] Error fetching live data:', this.lastError);
       return this.lastSummary;
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 
-  private parseAndSynthesizeSummary(flow: any, dev: any) {
-    let pvPowerW = 54.72;
-    let pvPowerKW = 0.0547;
-    let batterySocPct = 80.0;
+  /**
+   * Parse both Dessmonitor endpoints without inventing electrical power.
+   *
+   * Data-source priority:
+   * - querySPDeviceLastData:
+   *     PV power, battery SOC, grid voltage/frequency, load current, working state.
+   *     This endpoint is the "last device data" endpoint and should win for
+   *     overlapping telemetry values such as PV power and SOC.
+   * - webQueryDeviceEnergyFlowEs:
+   *     load active power, grid active power, battery active power and all
+   *     energy-flow directions (status).
+   *
+   * Direction rules from Dessmonitor:
+   *   pv_status:  1 generation, 0 idle
+   *   bt_status:  1 discharge, 0 idle, -1 charging
+   *   gd_status:  1 import/buy, 0 idle, -1 export/sell
+   *   bc_status: -1 consumption, 0 idle
+   *
+   * IMPORTANT:
+   * The status attached to bt_battery_capacity is not a power-flow direction
+   * for animation. Battery direction is read from battery_active_power only.
+   */
+  private parseLiveSummary(flow: any, dev: any) {
+    const previous = this.lastSummary ?? {};
+
+    let pvPowerW = 0;
+    let flowPvPowerW = 0;
+    let batterySocPct = previous.batterySocPct ?? 0;
+    let flowBatterySocPct: number | null = null;
     let batteryPowerW = 0;
     let gridPowerW = 0;
-    let loadPowerW = 167.0;
-    let gridVoltageV = 211.0;
-    let gridFrequencyHz = 50.0;
-    let loadCurrentA = 0.7;
-    let workingState = 'Inverted state';
-    let dateStr = new Date().toISOString();
+    let loadPowerW = 0;
 
-    // Parse Device Last Data
-    if (dev?.dat?.pars) {
-      const pars = dev.dat.pars;
-      if (pars.pv_ && pars.pv_[0]) {
-        const val = parseFloat(pars.pv_[0].val);
-        if (!isNaN(val)) pvPowerW = val;
+    let gridVoltageV = previous.gridVoltageV ?? 0;
+    let gridFrequencyHz = previous.gridFrequencyHz ?? 0;
+    let loadCurrentA = previous.loadCurrentA ?? 0;
+    let workingState = previous.workingState ?? 'Unknown';
+
+    let deviceUpdatedAt: string | null = null;
+    let flowUpdatedAt: string | null = null;
+
+    let hasDevicePv = false;
+    let hasDeviceSoc = false;
+
+    const devicePars = dev?.dat?.pars;
+
+    // -----------------------------------------------------------------------
+    // 1) querySPDeviceLastData — preferred for current telemetry
+    // -----------------------------------------------------------------------
+    if (devicePars) {
+      const pvItem = this.findDeviceItem(
+        devicePars.pv_,
+        ['pv_output_power'],
+        ['pv_output_power', 'pv power']
+      );
+      if (pvItem) {
+        pvPowerW = this.toWatts(pvItem, 'W');
+        hasDevicePv = true;
       }
-      if (pars.bt_ && pars.bt_[0]) {
-        const val = parseFloat(pars.bt_[0].val);
-        if (!isNaN(val)) batterySocPct = val;
+
+      const batterySocItem = this.findDeviceItem(
+        devicePars.bt_,
+        ['bt_battery_capacity'],
+        ['battery_capacity', 'capacity soc', 'soc']
+      );
+      if (batterySocItem) {
+        batterySocPct = this.toNumber(batterySocItem.val, batterySocPct);
+        hasDeviceSoc = true;
       }
-      if (pars.bc_ && pars.bc_[0]) {
-        const val = parseFloat(pars.bc_[0].val);
-        if (!isNaN(val)) loadCurrentA = val;
+
+      const gridVoltageItem = this.findDeviceItem(
+        devicePars.gd_,
+        ['gd_input_voltage'],
+        ['input_voltage', 'input voltage', 'grid_voltage']
+      );
+      if (gridVoltageItem) {
+        gridVoltageV = this.toNumber(gridVoltageItem.val, gridVoltageV);
       }
-      if (pars.gd_) {
-        const vPar = pars.gd_.find((p: any) => p.id === 'gd_input_voltage');
-        if (vPar) gridVoltageV = parseFloat(vPar.val) || gridVoltageV;
-        const fPar = pars.gd_.find((p: any) => p.id === 'gd_input_frequency');
-        if (fPar) gridFrequencyHz = parseFloat(fPar.val) || gridFrequencyHz;
+
+      const gridFrequencyItem = this.findDeviceItem(
+        devicePars.gd_,
+        ['gd_input_frequency'],
+        ['input_frequency', 'input frequency', 'grid_frequency', 'frequency']
+      );
+      if (gridFrequencyItem) {
+        gridFrequencyHz = this.toNumber(gridFrequencyItem.val, gridFrequencyHz);
       }
-      if (pars.sy_ && pars.sy_[0]) {
-        workingState = pars.sy_[0].val || workingState;
+
+      const loadCurrentItem = this.findDeviceItem(
+        devicePars.bc_,
+        ['bc_load_current', 'bc_output_current'],
+        ['load_current', 'load current', 'output_current', 'current']
+      );
+      if (loadCurrentItem) {
+        loadCurrentA = this.toNumber(loadCurrentItem.val, loadCurrentA);
       }
+
+      const stateItem = this.findDeviceItem(
+        devicePars.sy_,
+        ['sy_status', 'sy_working_state'],
+        ['working state', 'working_state', 'work_state', 'state']
+      ) ?? (Array.isArray(devicePars.sy_) ? devicePars.sy_[0] : undefined);
+
+      if (stateItem?.val) {
+        workingState = String(stateItem.val);
+      }
+
+      deviceUpdatedAt = this.parseDeviceTimestamp(dev?.dat?.gts);
     }
 
-    // Parse Flow Data
+    let pvStatus: FlowStatus = 0;
+    let batteryStatus: FlowStatus = 0;
+    let gridStatus: FlowStatus = 0;
+    let loadStatus: FlowStatus = 0;
+
+    // -----------------------------------------------------------------------
+    // 2) webQueryDeviceEnergyFlowEs — authoritative for flow direction/power
+    // -----------------------------------------------------------------------
     if (flow?.dat) {
       const dat = flow.dat;
-      if (dat.date) dateStr = dat.date;
+      flowUpdatedAt = dat.date ? String(dat.date) : null;
 
-      if (Array.isArray(dat.pv_status) && dat.pv_status[0]) {
-        const kw = parseFloat(dat.pv_status[0].val);
-        if (!isNaN(kw)) {
-          pvPowerKW = kw;
-          pvPowerW = kw * 1000;
+      const pvItem = this.findFlowItem(dat.pv_status, 'pv_output_power');
+      if (pvItem) {
+        // Keep a separate PV value for the flow diagram so every animated
+        // wattage belongs to the same energy-flow snapshot.
+        flowPvPowerW = this.toWatts(pvItem, 'W');
+        pvStatus = this.normalizeStatus(pvItem.status);
+        if (!hasDevicePv) {
+          pvPowerW = flowPvPowerW;
         }
       }
 
-      if (Array.isArray(dat.bt_status)) {
-        const socObj = dat.bt_status.find((b: any) => b.par === 'bt_battery_capacity');
-        if (socObj) {
-          const soc = parseFloat(socObj.val);
-          if (!isNaN(soc)) batterySocPct = soc;
-        }
-        const pwrObj = dat.bt_status.find((b: any) => b.par === 'battery_active_power');
-        if (pwrObj) {
-          const pwr = parseFloat(pwrObj.val);
-          if (!isNaN(pwr)) batteryPowerW = pwr;
+      const flowSocItem = Array.isArray(dat.bt_status)
+        ? dat.bt_status.find((item: any) => item?.par === 'bt_battery_capacity')
+        : undefined;
+      if (flowSocItem) {
+        flowBatterySocPct = this.toNumber(flowSocItem.val, batterySocPct);
+        if (!hasDeviceSoc) {
+          batterySocPct = flowBatterySocPct;
         }
       }
 
-      if (Array.isArray(dat.bc_status) && dat.bc_status[0]) {
-        const kw = parseFloat(dat.bc_status[0].val);
-        if (!isNaN(kw)) loadPowerW = kw * 1000;
+      const batteryPowerItem = Array.isArray(dat.bt_status)
+        ? dat.bt_status.find((item: any) => item?.par === 'battery_active_power')
+        : undefined;
+      if (batteryPowerItem) {
+        // Some devices omit the unit when the value is zero. For this device
+        // the field is retained as W unless Dessmonitor explicitly supplies a unit.
+        batteryPowerW = this.toWatts(batteryPowerItem, 'W');
+        batteryStatus = this.normalizeStatus(batteryPowerItem.status);
       }
 
-      if (Array.isArray(dat.gd_status) && dat.gd_status[0]) {
-        const kw = parseFloat(dat.gd_status[0].val);
-        if (!isNaN(kw)) gridPowerW = kw * 1000;
+      const gridItem = this.findFlowItem(dat.gd_status, 'grid_active_power');
+      if (gridItem) {
+        // Official Dessmonitor examples use kW for grid_active_power. Respect
+        // an explicit unit; otherwise default to kW. Zero remains zero either way.
+        gridPowerW = this.toWatts(gridItem, 'kW');
+        gridStatus = this.normalizeStatus(gridItem.status);
+      }
+
+      const loadItem = this.findFlowItem(dat.bc_status, 'load_active_power');
+      if (loadItem) {
+        loadPowerW = this.toWatts(loadItem, 'W');
+        loadStatus = this.normalizeStatus(loadItem.status);
       }
     }
 
-    // Check grid status and power
-    let isGridActive = false;
-    if (gridPowerW > 5 || gridVoltageV >= 180) {
-      isGridActive = true;
-    }
-    if (flow?.dat?.gd_status) {
-      const gdHasPower = flow.dat.gd_status.some((g: any) => parseFloat(g.val) > 0 || g.status === 1);
-      if (gdHasPower) isGridActive = true;
-    }
-    const lowerState = workingState.toLowerCase();
-    if (lowerState.includes('line') || lowerState.includes('grid') || lowerState.includes('bypass') || lowerState.includes('charge')) {
-      isGridActive = true;
-    }
+    // Never animate direction when actual measured power is effectively zero.
+    if (flowPvPowerW <= 0.5 && flow?.dat) pvStatus = 0;
+    if (!flow?.dat && pvPowerW <= 0.5) pvStatus = 0;
+    if (batteryPowerW <= 0.5) batteryStatus = 0;
+    if (gridPowerW <= 0.5) gridStatus = 0;
+    if (loadPowerW <= 0.5) loadStatus = 0;
 
-    // Determine battery direction: charging vs discharging vs idle
-    let batteryDirection: 'charging' | 'discharging' | 'idle' = 'discharging';
-    const hasBtChargingFlag = flow?.dat?.bt_status?.some((b: any) => b.status === 1 || b.par?.includes('charge'));
-    
-    if (hasBtChargingFlag || isGridActive || pvPowerW > loadPowerW || lowerState.includes('charge') || lowerState.includes('line')) {
-      batteryDirection = 'charging';
-      if (batteryPowerW <= 0) {
-        batteryPowerW = isGridActive ? Math.max(25, (gridPowerW > 0 ? gridPowerW : 180) + pvPowerW - loadPowerW) : Math.max(15, pvPowerW - loadPowerW);
-      }
-    } else if (pvPowerW < loadPowerW && !isGridActive) {
-      batteryDirection = 'discharging';
-      if (batteryPowerW <= 0) {
-        batteryPowerW = Math.max(0, loadPowerW - pvPowerW);
-      }
-    } else {
-      batteryDirection = 'idle';
-    }
+    const batteryDirection: BatteryDirection =
+      batteryStatus === -1
+        ? 'charging'
+        : batteryStatus === 1
+          ? 'discharging'
+          : 'idle';
 
-    if (isGridActive && gridPowerW <= 0) {
-      gridPowerW = Math.max(180, Number((loadPowerW + (batteryDirection === 'charging' ? batteryPowerW : 0) - pvPowerW).toFixed(1)));
-    }
+    const gridDirection: GridDirection =
+      gridStatus === 1
+        ? 'importing'
+        : gridStatus === -1
+          ? 'exporting'
+          : 'idle';
 
-    pvPowerKW = Number((pvPowerW / 1000).toFixed(4));
+    // Voltage means PLN is physically present/available, not necessarily flowing.
+    const isGridAvailable = gridVoltageV >= 180;
+    const isGridActive = gridStatus !== 0 && gridPowerW > 0.5;
+
+    const pvPowerKW = pvPowerW / 1000;
+    const lastUpdated =
+      deviceUpdatedAt ??
+      flowUpdatedAt ??
+      new Date().toISOString();
 
     this.lastSummary = {
       pvPowerW: Number(pvPowerW.toFixed(2)),
-      pvPowerKW,
-      batterySocPct: Number(batterySocPct.toFixed(1)),
-      batteryPowerW: Number(Math.abs(batteryPowerW).toFixed(1)),
+      pvPowerKW: Number(pvPowerKW.toFixed(4)),
+      flowPvPowerW: Number(flowPvPowerW.toFixed(2)),
+      batterySocPct: Number(Math.max(0, Math.min(100, batterySocPct)).toFixed(1)),
+      flowBatterySocPct: flowBatterySocPct == null
+        ? null
+        : Number(Math.max(0, Math.min(100, flowBatterySocPct)).toFixed(1)),
+      batteryPowerW: Number(batteryPowerW.toFixed(1)),
       gridPowerW: Number(gridPowerW.toFixed(1)),
       loadPowerW: Number(loadPowerW.toFixed(1)),
       gridVoltageV: Number(gridVoltageV.toFixed(1)),
@@ -228,11 +415,26 @@ export class PltsMonitoringService extends EventEmitter {
       loadCurrentA: Number(loadCurrentA.toFixed(2)),
       workingState,
       isGridActive,
+      isGridAvailable,
       batteryDirection,
-      lastUpdated: dateStr,
+      gridDirection,
+      flowStatus: {
+        pv: pvStatus,
+        battery: batteryStatus,
+        grid: gridStatus,
+        load: loadStatus,
+      },
+      sourceStatus: {
+        device: Boolean(devicePars),
+        energyFlow: Boolean(flow?.dat),
+      },
+      deviceUpdatedAt,
+      flowUpdatedAt,
+      lastUpdated,
       rawFlow: flow,
       rawDevice: dev,
-      connected: true,
+      connected: Boolean(devicePars || flow?.dat),
+      error: undefined,
     };
 
     const timeLabel = new Date().toISOString().substring(11, 19);
@@ -252,9 +454,15 @@ export class PltsMonitoringService extends EventEmitter {
 
   public startPolling(ms: number = 15000) {
     if (this.pollInterval) clearInterval(this.pollInterval);
-    this.fetchLivePltsData();
+
+    this.fetchLivePltsData().catch((err) => {
+      console.warn('[PLTS Service] Initial fetch failed:', err);
+    });
+
     this.pollInterval = setInterval(() => {
-      this.fetchLivePltsData();
+      this.fetchLivePltsData().catch((err) => {
+        console.warn('[PLTS Service] Poll failed:', err);
+      });
     }, ms);
   }
 
