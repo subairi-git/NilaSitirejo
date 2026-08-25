@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { PltsSummary } from '../types';
 import { PltsIsometricFlow } from './PltsIsometricFlow';
+import { PltsPowerComparisonChart } from './PltsPowerComparisonChart';
 
 interface PltsEnergyFlowProps {
   summary: PltsSummary | null;
@@ -93,6 +94,9 @@ export const PltsEnergyFlow: React.FC<PltsEnergyFlowProps> = ({ summary, onRefre
     <div className="space-y-6">
       {/* Main live diagram. All directions are status-driven by Dessmonitor. */}
       <PltsIsometricFlow summary={summary} onRefresh={onRefresh} />
+
+      {/* Line chart requested below the animated PLTS flow diagram. */}
+      <PltsPowerComparisonChart />
 
       <div className="flex flex-wrap gap-2 text-[11px]">
         <span className={`px-2.5 py-1 rounded-lg border ${sourceStatus.device ? 'border-emerald-700/60 bg-emerald-950/30 text-emerald-300' : 'border-rose-700/60 bg-rose-950/30 text-rose-300'}`}>
