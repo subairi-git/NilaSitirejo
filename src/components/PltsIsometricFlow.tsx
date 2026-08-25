@@ -32,58 +32,103 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
   const [lastFetchTime, setLastFetchTime] = useState<string>(new Date().toLocaleTimeString('id-ID'));
   const [countdown, setCountdown] = useState<number>(10);
 
-  // Live real data from Dessmonitor API
-  const pvW = summary?.pvPowerW ?? 32.3;
-  const batSoc = summary?.batterySocPct ?? 68.0;
-  const loadW = summary?.loadPowerW ?? 167.0;
-  const rawVoltage = summary?.gridVoltageV ?? 211.0;
-  const rawFreq = summary?.gridFrequencyHz ?? 50.0;
-  const rawCurrent = summary?.loadCurrentA ?? 0.7;
-  const rawDate = summary?.lastUpdated || summary?.rawFlow?.date || 'Live';
-  const workingState = summary?.workingState ?? 'Line state (PLN Aktif & Cas Baterai)';
+  // ---------------------------------------------------------------------------
+  // Dessmonitor live energy-flow state
+  // Direction MUST come from webQueryDeviceEnergyFlowEs.status:
+  //   PV      :  1 generation, 0 idle
+  //   Battery :  1 discharge, 0 idle, -1 charge
+  //   Grid    :  1 import/buy, 0 idle, -1 export/sell
+  //   Load    : -1 consuming, 0 idle
+  // Do not infer energy flow from voltage, workingState, or power balance.
+  // ---------------------------------------------------------------------------
+  const rawFlowResponse = summary?.rawFlow as any;
+  const flowDat = rawFlowResponse?.dat ?? rawFlowResponse ?? null;
 
-  // Check if Grid / PLN is active
-  const isGridActive = Boolean(
-    (summary?.gridPowerW && summary.gridPowerW > 5) ||
-    summary?.isGridActive ||
-    (rawVoltage >= 180) ||
-    (summary?.rawFlow?.gd_status?.some((g: any) => parseFloat(g.val) > 0 || g.status === 1)) ||
-    workingState.toLowerCase().includes('line') ||
-    workingState.toLowerCase().includes('grid') ||
-    workingState.toLowerCase().includes('bypass') ||
-    workingState.toLowerCase().includes('charge')
-  );
+  const findFlowItem = (items: any[] | undefined, par: string) =>
+    Array.isArray(items) ? items.find((item: any) => item?.par === par) ?? items[0] : undefined;
 
-  let gridW = summary?.gridPowerW ?? 0.0;
-  if (isGridActive && gridW <= 0) {
-    gridW = Number((loadW + 35 - pvW).toFixed(1));
-    if (gridW <= 0) gridW = 180.0;
-  }
+  const pvFlowItem = findFlowItem(flowDat?.pv_status, 'pv_output_power');
+  const batteryPowerItem = findFlowItem(flowDat?.bt_status, 'battery_active_power');
+  const gridFlowItem = findFlowItem(flowDat?.gd_status, 'grid_active_power');
+  const loadFlowItem = findFlowItem(flowDat?.bc_status, 'load_active_power');
 
-  // Compute live battery power & direction from API
-  let batteryDirection: 'charging' | 'discharging' | 'idle' = summary?.batteryDirection || 'charging';
-  let batteryPowerW = summary?.batteryPowerW ?? 0;
+  const normalizeStatus = (value: unknown): -1 | 0 | 1 => {
+    const n = Number(value);
+    return n === 1 ? 1 : n === -1 ? -1 : 0;
+  };
 
-  const rawBtStatus = summary?.rawFlow?.bt_status;
-  const hasBtChargingFlag = Array.isArray(rawBtStatus) && rawBtStatus.some((b: any) => b.status === 1 || b.par?.includes('charge'));
+  // The diagram uses the PV value from the same energy-flow snapshot as
+  // load/grid/battery, while the KPI card can use newer device-last-data.
+  const currentPvW = Math.max(0, summary?.pvPowerW ?? 0);
+  const pvW = Math.max(0, (summary as any)?.flowPvPowerW ?? currentPvW);
+  const batSoc = Math.max(0, Math.min(100, summary?.batterySocPct ?? 0));
+  const batteryPowerW = Math.max(0, Math.abs(summary?.batteryPowerW ?? 0));
+  const gridW = Math.max(0, Math.abs(summary?.gridPowerW ?? 0));
+  const loadW = Math.max(0, summary?.loadPowerW ?? 0);
+  const rawVoltage = summary?.gridVoltageV ?? 0;
+  const rawFreq = summary?.gridFrequencyHz ?? 0;
+  const rawCurrent = summary?.loadCurrentA ?? 0;
+  const deviceUpdatedAt = (summary as any)?.deviceUpdatedAt ?? summary?.lastUpdated ?? null;
+  const flowUpdatedAt = (summary as any)?.flowUpdatedAt ?? flowDat?.date ?? null;
+  const sourceStatus = (summary as any)?.sourceStatus ?? {};
+  const rawDate = deviceUpdatedAt || flowUpdatedAt || 'Live';
+  const workingState = summary?.workingState ?? 'Unknown';
 
-  if (summary?.batteryDirection) {
-    batteryDirection = summary.batteryDirection;
-  } else if (hasBtChargingFlag || isGridActive || pvW > loadW || workingState.toLowerCase().includes('charge') || workingState.toLowerCase().includes('line')) {
-    batteryDirection = 'charging';
-  } else if (pvW < loadW && !isGridActive) {
-    batteryDirection = 'discharging';
-  } else {
-    batteryDirection = 'idle';
-  }
+  // Prefer the raw status of the specific power item. This is important because
+  // bt_battery_capacity can have status=-1 even when battery_active_power is 0.
+  const summaryFlowStatus = (summary as any)?.flowStatus;
 
-  if (batteryPowerW <= 0) {
-    if (batteryDirection === 'charging') {
-      batteryPowerW = isGridActive ? Math.max(35, Number((gridW + pvW - loadW).toFixed(1))) : Math.max(15, Number((pvW - loadW).toFixed(1)));
-    } else if (batteryDirection === 'discharging') {
-      batteryPowerW = Math.max(0, Number((loadW - pvW).toFixed(1)));
-    }
-  }
+  const pvStatus = pvFlowItem
+    ? normalizeStatus(pvFlowItem.status)
+    : normalizeStatus(summaryFlowStatus?.pv ?? (pvW > 1 ? 1 : 0));
+  const batteryStatus = batteryPowerItem
+    ? normalizeStatus(batteryPowerItem.status)
+    : normalizeStatus(summaryFlowStatus?.battery ?? 0);
+  const gridStatus = gridFlowItem
+    ? normalizeStatus(gridFlowItem.status)
+    : normalizeStatus(summaryFlowStatus?.grid ?? 0);
+  const loadStatus = loadFlowItem
+    ? normalizeStatus(loadFlowItem.status)
+    : normalizeStatus(summaryFlowStatus?.load ?? (loadW > 1 ? -1 : 0));
+
+  const batteryDirection: 'charging' | 'discharging' | 'idle' =
+    batteryPowerW <= 1
+      ? 'idle'
+      : batteryStatus === -1
+        ? 'charging'
+        : batteryStatus === 1
+          ? 'discharging'
+          : 'idle';
+
+  const gridDirection: 'importing' | 'exporting' | 'idle' =
+    gridW <= 1
+      ? 'idle'
+      : gridStatus === 1
+        ? 'importing'
+        : gridStatus === -1
+          ? 'exporting'
+          : 'idle';
+
+  const pvActive = pvStatus === 1 && pvW > 1;
+  const loadActive = loadStatus === -1 && loadW > 1;
+  const batteryActive = batteryDirection !== 'idle' && batteryPowerW > 1;
+  const isGridActive = gridDirection !== 'idle' && gridW > 1;
+  const isGridAvailable = (summary as any)?.isGridAvailable ?? rawVoltage >= 180;
+
+  const activeSources: string[] = [];
+  const activeSinks: string[] = [];
+  if (pvActive) activeSources.push(`PV (${pvW.toFixed(1)}W)`);
+  if (gridDirection === 'importing' && isGridActive) activeSources.push(`PLN (${gridW.toFixed(0)}W)`);
+  if (batteryDirection === 'discharging' && batteryActive) activeSources.push(`Baterai (${batteryPowerW.toFixed(0)}W)`);
+  if (loadActive) activeSinks.push(`Beban Kolam (${loadW.toFixed(0)}W)`);
+  if (batteryDirection === 'charging' && batteryActive) activeSinks.push(`Cas Baterai (${batteryPowerW.toFixed(0)}W)`);
+  if (gridDirection === 'exporting' && isGridActive) activeSinks.push(`Ekspor PLN (${gridW.toFixed(0)}W)`);
+
+  const activeFlowSummary = activeSources.length > 0
+    ? `${activeSources.join(' + ')} ➔ Inverter${activeSinks.length ? ` ➔ ${activeSinks.join(' + ')}` : ''}`
+    : activeSinks.length > 0
+      ? `Inverter ➔ ${activeSinks.join(' + ')}`
+      : 'Tidak ada aliran daya aktif (status API = 0)';
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
@@ -130,7 +175,9 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
                 Live API: webQueryDeviceEnergyFlowEs
               </span>
               <span className="text-xs text-slate-400 font-mono">
-                Timestamp: <strong className="text-slate-200">{rawDate}</strong>
+                Device: <strong className="text-slate-200">{deviceUpdatedAt ?? '-'}</strong>
+                <span className="mx-1 text-slate-600">•</span>
+                Flow: <strong className="text-slate-200">{flowUpdatedAt ?? '-'}</strong>
               </span>
             </div>
             <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
@@ -171,7 +218,7 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
             </span>
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#020617] border border-cyan-500/30 text-cyan-300 font-semibold shadow-[0_0_10px_rgba(6,182,212,0.2)]">
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span>📡 Live API Dessmonitor (Real-Time)</span>
+              <span>📡 Dessmonitor: Device {sourceStatus.device ? '✓' : '×'} • Flow {sourceStatus.energyFlow ? '✓' : '×'}</span>
             </div>
           </div>
 
@@ -328,7 +375,7 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
             {/* ========================================================= */}
 
             {/* Path 1 Animated Flow: PV -> Device (Inverter) */}
-            {pvW > 1 && (
+            {pvActive && (
               <path
                 d="M 275 145 L 275 255 A 20 20 0 0 0 295 275 L 455 275"
                 fill="none"
@@ -341,22 +388,22 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
               />
             )}
 
-            {/* Path 2 Animated Flow: Grid (PLN) -> Device (Inverter) */}
-            {isGridActive && gridW > 1 && (
+            {/* Path 2 Animated Flow: Grid <-> Device. status=1 import, status=-1 export */}
+            {isGridActive && (
               <path
                 d="M 725 145 L 725 255 A 20 20 0 0 1 705 275 L 545 275"
                 fill="none"
-                stroke="#38bdf8"
+                stroke={gridDirection === 'importing' ? '#38bdf8' : '#a78bfa'}
                 strokeWidth="6.5"
                 strokeLinecap="round"
                 strokeDasharray="0.1 22"
                 filter="url(#glow-cyan)"
-                className="flow-dots-forward"
+                className={gridDirection === 'importing' ? 'flow-dots-forward' : 'flow-dots-backward'}
               />
             )}
 
             {/* Path 3 Animated Flow: Inverter -> Battery (Charging / Cas) */}
-            {batteryDirection === 'charging' && (
+            {batteryDirection === 'charging' && batteryActive && (
               <path
                 d="M 455 315 L 295 315 A 20 20 0 0 0 275 335 L 275 435"
                 fill="none"
@@ -370,7 +417,7 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
             )}
 
             {/* Path 3 Animated Flow: Battery -> Inverter (Discharging) */}
-            {batteryDirection === 'discharging' && batteryPowerW > 1 && (
+            {batteryDirection === 'discharging' && batteryActive && (
               <path
                 d="M 275 435 L 275 335 A 20 20 0 0 1 295 315 L 455 315"
                 fill="none"
@@ -384,7 +431,7 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
             )}
 
             {/* Path 4 Animated Flow: Inverter -> Load (Beban Aerator & Kincir) */}
-            {loadW > 1 && (
+            {loadActive && (
               <path
                 d="M 545 315 L 705 315 A 20 20 0 0 1 725 335 L 725 435"
                 fill="none"
@@ -416,19 +463,19 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
               </text>
             </g>
 
-            {/* Grid Power text when active: e.g. "180W" over horizontal pipe */}
+            {/* Grid power is displayed only when the API reports actual import/export flow */}
             {isGridActive && (
               <g transform="translate(640, 252)">
                 <text
                   textAnchor="middle"
                   className="font-mono font-bold select-none cursor-pointer"
-                  fill="#38bdf8"
+                  fill={gridDirection === 'importing' ? '#38bdf8' : '#a78bfa'}
                   fontSize="17"
                   letterSpacing="0.5"
                   filter="drop-shadow(0 0 6px rgba(56,189,248,0.6))"
                   onClick={() => setSelectedNode('grid')}
                 >
-                  {gridW.toFixed(0)}W
+                  {gridDirection === 'importing' ? 'PLN ' : 'Ekspor '}{gridW.toFixed(0)}W
                 </text>
               </g>
             )}
@@ -444,7 +491,7 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
                 filter="drop-shadow(0 0 6px rgba(56,189,248,0.6))"
                 onClick={() => setSelectedNode('battery')}
               >
-                {batSoc.toFixed(0)}%{batteryDirection === 'charging' ? ` (+${batteryPowerW.toFixed(0)}W)` : ''}
+                {batSoc.toFixed(0)}%{batteryDirection === 'charging' ? ` (+${batteryPowerW.toFixed(0)}W)` : batteryDirection === 'discharging' ? ` (-${batteryPowerW.toFixed(0)}W)` : ' (Idle)'}
               </text>
             </g>
 
@@ -859,13 +906,7 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
               <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)] animate-ping" />
               <span className="text-slate-400">Arus Daya Aktif:</span>
               <strong className="text-emerald-300 font-mono">
-                {isGridActive && batteryDirection === 'charging'
-                  ? `PLN (${gridW.toFixed(0)}W) + PV (${pvW.toFixed(1)}W) ➔ Inverter ➔ Beban Kolam (${loadW.toFixed(0)}W) & Cas Baterai (+${batteryPowerW.toFixed(0)}W)`
-                  : batteryDirection === 'charging'
-                  ? `PV (${pvW.toFixed(1)}W) ➔ Inverter ➔ Beban Kolam (${loadW.toFixed(0)}W) & Cas Baterai (+${batteryPowerW.toFixed(0)}W)`
-                  : isGridActive
-                  ? `PLN (${gridW.toFixed(0)}W) + PV (${pvW.toFixed(1)}W) ➔ Inverter ➔ Beban Kolam (${loadW.toFixed(0)}W)`
-                  : `PV (${pvW.toFixed(1)}W) + Baterai (${batteryPowerW.toFixed(0)}W) ➔ Beban Kolam (${loadW.toFixed(0)}W)`}
+                {activeFlowSummary}
               </strong>
             </div>
           </div>
@@ -923,18 +964,30 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
             <Power className="w-4 h-4 text-cyan-400" />
           </div>
           <div className="text-xl font-black text-cyan-400 font-mono">
-            {isGridActive ? `${gridW.toFixed(0)} W` : '0 W'}
+            {gridW.toFixed(0)} <span className="text-xs text-slate-400">W</span>
           </div>
           <div className="text-xs text-slate-400 mt-2 space-y-1">
             <div className="flex justify-between">
               <span>Status:</span>
               <span className={isGridActive ? "text-emerald-400 font-semibold" : "text-slate-400"}>
-                {isGridActive ? 'PLN Aktif & Menyuplai' : 'Standby'}
+                {gridDirection === 'importing' && isGridActive
+                  ? 'PLN Menyuplai'
+                  : gridDirection === 'exporting' && isGridActive
+                    ? 'Ekspor ke PLN'
+                    : isGridAvailable
+                      ? 'PLN Tersedia • Tanpa Aliran'
+                      : 'PLN Tidak Tersedia'}
               </span>
             </div>
             <div className="flex justify-between">
               <span>Alur:</span>
-              <span className="text-cyan-300 font-mono text-[11px]">PLN ➔ Inverter</span>
+              <span className="text-cyan-300 font-mono text-[11px]">
+                {gridDirection === 'importing' && isGridActive
+                  ? 'PLN ➔ Inverter'
+                  : gridDirection === 'exporting' && isGridActive
+                    ? 'Inverter ➔ PLN'
+                    : 'Tidak ada aliran'}
+              </span>
             </div>
           </div>
         </div>
@@ -987,13 +1040,21 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
             <div className="flex justify-between">
               <span>Status:</span>
               <span className="text-emerald-400 font-semibold capitalize">
-                {batteryDirection === 'charging' ? `Mengisi (+${batteryPowerW.toFixed(0)}W)` : `Discharge (${batteryPowerW.toFixed(0)}W)`}
+                {batteryDirection === 'charging' && batteryActive
+                  ? `Mengisi (+${batteryPowerW.toFixed(0)}W)`
+                  : batteryDirection === 'discharging' && batteryActive
+                    ? `Discharge (${batteryPowerW.toFixed(0)}W)`
+                    : 'Idle (0W)'}
               </span>
             </div>
             <div className="flex justify-between">
               <span>Alur:</span>
               <span className="text-emerald-300 font-mono text-[11px]">
-                {batteryDirection === 'charging' ? 'Inverter ➔ Baterai' : 'Baterai ➔ Inverter'}
+                {batteryDirection === 'charging' && batteryActive
+                  ? 'Inverter ➔ Baterai'
+                  : batteryDirection === 'discharging' && batteryActive
+                    ? 'Baterai ➔ Inverter'
+                    : 'Tidak ada aliran'}
               </span>
             </div>
           </div>
@@ -1034,26 +1095,36 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
           <div className="flex items-center justify-between border-b border-slate-800/80 pb-3">
             <div className="flex items-center gap-2">
               <Code className="w-4 h-4 text-cyan-400" />
-              <h2 className="text-sm font-bold text-white">Payload Asli: action=webQueryDeviceEnergyFlowEs</h2>
+              <h2 className="text-sm font-bold text-white">Payload Asli: 2 Endpoint Dessmonitor</h2>
             </div>
-            <span className="text-xs text-slate-400 font-mono">http://api.dessmonitor.com/public/</span>
+            <span className="text-xs text-slate-400 font-mono">querySPDeviceLastData + webQueryDeviceEnergyFlowEs</span>
           </div>
 
           <pre className="p-4 bg-[#020617] rounded-xl text-xs font-mono text-cyan-300 overflow-x-auto max-h-80 border border-slate-800 shadow-inner">
-            {JSON.stringify(summary?.rawFlow || {
-              err: 0,
-              desc: "ERR_NONE",
-              dat: {
-                brand: 0,
-                status: 0,
-                date: rawDate,
-                pv_status: [{ par: "pv_output_power", val: (pvW / 1000).toFixed(4), unit: "kW", status: 1 }],
-                bt_status: [
-                  { par: "bt_battery_capacity", val: batSoc.toFixed(1), unit: "%", status: 1 },
-                  { par: "battery_active_power", val: (batteryPowerW / 1000).toFixed(4), status: batteryDirection === 'charging' ? 1 : -1 }
-                ],
-                bc_status: [{ par: "load_active_power", val: (loadW / 1000).toFixed(4), unit: "kW", status: -1 }],
-                gd_status: [{ par: "grid_active_power", val: (gridW / 1000).toFixed(4), status: gridW > 0 ? 1 : 0 }]
+            {JSON.stringify({
+              querySPDeviceLastData: summary?.rawDevice ?? {
+                dat: {
+                  gts: deviceUpdatedAt,
+                  pars: {
+                    gd_: [
+                      { id: 'gd_input_voltage', val: rawVoltage, unit: 'V' },
+                      { id: 'gd_input_frequency', val: rawFreq, unit: 'Hz' }
+                    ],
+                    sy_: [{ id: 'sy_status', val: workingState }],
+                    pv_: [{ id: 'pv_output_power', val: currentPvW, unit: 'W' }],
+                    bt_: [{ id: 'bt_battery_capacity', val: batSoc, unit: '%' }],
+                    bc_: [{ id: 'bc_load_current', val: rawCurrent, unit: 'A' }]
+                  }
+                }
+              },
+              webQueryDeviceEnergyFlowEs: summary?.rawFlow ?? {
+                dat: {
+                  date: flowUpdatedAt,
+                  pv_status: [{ par: 'pv_output_power', val: pvW, unit: 'W', status: pvStatus }],
+                  bt_status: [{ par: 'battery_active_power', val: batteryPowerW, unit: 'W', status: batteryStatus }],
+                  gd_status: [{ par: 'grid_active_power', val: gridW, unit: 'W', status: gridStatus }],
+                  bc_status: [{ par: 'load_active_power', val: loadW, unit: 'W', status: loadStatus }]
+                }
               }
             }, null, 2)}
           </pre>
