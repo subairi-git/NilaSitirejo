@@ -454,7 +454,7 @@ export const DeviceCommandsModal: React.FC<DeviceCommandsModalProps> = ({ user, 
           </div>
           <div>
             <div className="text-xs font-bold text-white group-hover:text-purple-300">Info Hardware</div>
-            <div className="text-[10px] text-slate-400">ESP32 & RS485 Chip</div>
+            <div className="text-[10px] text-slate-400">Chips & RS485 </div>
           </div>
         </button>
 
