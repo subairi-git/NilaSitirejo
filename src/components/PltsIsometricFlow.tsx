@@ -198,7 +198,7 @@ export const PltsIsometricFlow: React.FC<PltsIsometricFlowProps> = ({ summary, o
               </span>
             </div>
             <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
-              Visualisasi Animasi Arus Daya PLTS Kolam Nila
+              Visualisasi Aliran Daya PLTS Kolam Nila
             </h1>
             <p className="text-xs sm:text-sm text-slate-300 max-w-3xl mt-1">
               Diagram alur arus energi fotovoltaik (PV), baterai penyimpanan LiFePO4, inverter sentral kolam, beban aerator kincir air, dan interkoneksi PLN secara real-time langsung dari Dessmonitor API.
