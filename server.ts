@@ -3,11 +3,29 @@ import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { mqttService } from './server/mqttService';
 import { pltsService } from './server/pltsService';
+import { databaseService } from './server/databaseService';
 import { authenticateUser, registerUser, verifyAuthToken, changeUserPassword, getAllUsers } from './server/authService';
+
+const FIVE_MINUTES_MS = 5 * 60 * 1000;
+
+function normalizeDays(value: unknown): 1 | 7 | 30 {
+  const parsed = Number(value);
+  if (parsed === 7) return 7;
+  if (parsed === 30) return 30;
+  return 1;
+}
+
+function escapeCsv(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  const text = String(value).replace(/"/g, '""');
+  return `"${text}"`;
+}
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
+
+  await databaseService.connect();
 
   app.use(express.json());
 
@@ -37,15 +55,67 @@ async function startServer() {
     next();
   };
 
+  // Simpan snapshot hanya jika bucket 5 menit saat ini belum punya data.
+  const persistLatestTelemetry = async () => {
+    const latest = mqttService.latestTelemetry;
+
+    // mqttService mempunyai data awal/default; received_at menjadi indikator bahwa
+    // data telemetri aktual sudah pernah diterima.
+    if (!latest || !latest.received_at) return false;
+
+    const plts = pltsService.lastSummary;
+
+    const pltsSnapshot = plts
+      ? {
+          pvPowerW: Number.isFinite(plts.pvPowerW) ? plts.pvPowerW : null,
+          pvPowerKW: Number.isFinite(plts.pvPowerKW) ? plts.pvPowerKW : null,
+          batterySocPct: Number.isFinite(plts.batterySocPct) ? plts.batterySocPct : null,
+          batteryPowerW: Number.isFinite(plts.batteryPowerW) ? plts.batteryPowerW : null,
+          loadPowerW: Number.isFinite(plts.loadPowerW) ? plts.loadPowerW : null,
+          gridPowerW: Number.isFinite(plts.gridPowerW) ? plts.gridPowerW : null,
+          gridVoltageV: Number.isFinite(plts.gridVoltageV) ? plts.gridVoltageV : null,
+          gridFrequencyHz: Number.isFinite(plts.gridFrequencyHz) ? plts.gridFrequencyHz : null,
+          loadCurrentA: Number.isFinite(plts.loadCurrentA) ? plts.loadCurrentA : null,
+          workingState: plts.workingState || null,
+          isGridActive:
+            typeof plts.isGridActive === 'boolean' ? plts.isGridActive : null,
+          isGridAvailable:
+            typeof (plts as any).isGridAvailable === 'boolean'
+              ? (plts as any).isGridAvailable
+              : null,
+          batteryDirection: plts.batteryDirection || null,
+          gridDirection: (plts as any).gridDirection || null,
+          connected: Boolean(plts.connected),
+          lastUpdated: plts.lastUpdated || null,
+        }
+      : null;
+
+    return databaseService.saveTelemetryIfDue(latest, pltsSnapshot);
+  };
+
+  // Backup scheduler. cron-job.org ke /api/health juga memanggil fungsi yang sama.
+  const databaseTimer = setInterval(() => {
+    void persistLatestTelemetry();
+  }, FIVE_MINUTES_MS);
+
   // --- API ROUTES ---
 
-  // Health check
-  app.get('/api/health', (req, res) => {
+  // Health check + trigger persistence untuk cron-job.org
+  app.get('/api/health', async (req, res) => {
+    const snapshotSaved = await persistLatestTelemetry();
+
     res.json({
       status: 'ok',
       time: new Date().toISOString(),
       mqttConnected: mqttService.isConnected,
       pltsConnected: pltsService.isConnected,
+      mongodbConnected: databaseService.isConnected,
+      mongodbLastError: databaseService.lastError,
+      mongodbLastSavedAt: databaseService.lastSavedAt?.toISOString() || null,
+      snapshotSaved,
+      telemetryRecords: databaseService.isConnected
+        ? await databaseService.countTelemetry()
+        : 0,
     });
   });
 
@@ -105,14 +175,174 @@ async function startServer() {
     });
   });
 
-  app.get('/api/telemetry/history', (req, res) => {
-    const limit = parseInt(req.query.limit as string) || 100;
-    const history = mqttService.telemetryHistory.slice(-limit);
-    res.json({
-      success: true,
-      count: history.length,
-      history,
-    });
+  // MongoDB history: /api/telemetry/history?days=1|7|30&limit=10000
+  app.get('/api/telemetry/history', async (req, res) => {
+    try {
+      const days = normalizeDays(req.query.days);
+      const limit = Math.min(
+        Math.max(parseInt(req.query.limit as string) || 10000, 1),
+        10000
+      );
+      const device = typeof req.query.device === 'string' ? req.query.device : undefined;
+
+      if (databaseService.isConnected) {
+        const history = await databaseService.getHistory({ days, limit, device });
+
+        return res.json({
+          success: true,
+          source: 'mongodb',
+          days,
+          count: history.length,
+          history,
+        });
+      }
+
+      // Fallback RAM jika Atlas sedang tidak tersedia.
+      const history = mqttService.telemetryHistory.slice(-Math.min(limit, 200));
+
+      return res.json({
+        success: true,
+        source: 'memory',
+        days,
+        count: history.length,
+        history,
+      });
+    } catch (error: any) {
+      console.error('[API] telemetry history error:', error);
+      res.status(500).json({
+        success: false,
+        error: error?.message || 'Gagal mengambil riwayat telemetry',
+      });
+    }
+  });
+
+  app.get('/api/telemetry/stats', async (req, res) => {
+    try {
+      const days = normalizeDays(req.query.days);
+      const device = typeof req.query.device === 'string' ? req.query.device : undefined;
+
+      const stats = databaseService.isConnected
+        ? await databaseService.getStats(days, device)
+        : {
+            count: 0,
+            firstRecordedAt: null,
+            lastRecordedAt: null,
+            ph: { avg: null, min: null, max: null },
+            dissolvedOxygen: { avg: null, min: null, max: null },
+            temperature: { avg: null, min: null, max: null },
+            plts: {
+              pvPowerW: { avg: null, min: null, max: null },
+              batterySocPct: { avg: null, min: null, max: null },
+              loadPowerW: { avg: null, min: null, max: null },
+              gridPowerW: { avg: null, min: null, max: null },
+              gridAvailableCount: 0,
+              gridActiveCount: 0,
+              latestGridAvailable: null,
+              latestGridActive: null,
+            },
+          };
+
+      res.json({
+        success: true,
+        days,
+        source: databaseService.isConnected ? 'mongodb' : 'memory',
+        stats,
+      });
+    } catch (error: any) {
+      res.status(500).json({
+        success: false,
+        error: error?.message || 'Gagal menghitung statistik',
+      });
+    }
+  });
+
+  // Export CSV langsung dari MongoDB.
+  app.get('/api/telemetry/export.csv', async (req, res) => {
+    try {
+      const days = normalizeDays(req.query.days);
+      const device = typeof req.query.device === 'string' ? req.query.device : undefined;
+      const rows = databaseService.isConnected
+        ? await databaseService.getHistory({ days, limit: 10000, device })
+        : mqttService.telemetryHistory.slice(-200);
+
+      const headers = [
+        'Recorded_At',
+        'Timestamp_Device',
+        'Device',
+        'pH',
+        'pH_mV',
+        'DO_mg_L',
+        'DO_Saturation_pct',
+        'Temperature_C',
+        'DO_OK',
+        'Modbus_Code',
+        'WiFi_Connected',
+        'WiFi_RSSI',
+        'MQTT_Connected',
+        'IP',
+        'Uptime_s',
+        'PLTS_Power_W',
+        'Battery_SOC_pct',
+        'Battery_Power_W',
+        'Load_Power_W',
+        'Grid_Power_W',
+        'Grid_Voltage_V',
+        'Grid_Frequency_Hz',
+        'PLN_Available',
+        'PLN_Active_Flow',
+        'Battery_Direction',
+        'Grid_Direction',
+        'PLTS_Connected',
+        'PLTS_Last_Updated',
+      ];
+
+      const csvRows = rows.map((row: any) => [
+        escapeCsv(row.recordedAt ? new Date(row.recordedAt).toISOString() : row.received_at || ''),
+        escapeCsv(row.timestamp || ''),
+        escapeCsv(row.device || ''),
+        escapeCsv(row.ph),
+        escapeCsv(row.ph_mv),
+        escapeCsv(row.do_mg_l),
+        escapeCsv(row.do_saturation_pct),
+        escapeCsv(row.water_temperature_c),
+        escapeCsv(row.do_ok),
+        escapeCsv(row.modbus_code),
+        escapeCsv(row.wifi_connected),
+        escapeCsv(row.wifi_rssi),
+        escapeCsv(row.mqtt_connected),
+        escapeCsv(row.ip),
+        escapeCsv(row.uptime_s),
+        escapeCsv(row.plts?.pvPowerW),
+        escapeCsv(row.plts?.batterySocPct),
+        escapeCsv(row.plts?.batteryPowerW),
+        escapeCsv(row.plts?.loadPowerW),
+        escapeCsv(row.plts?.gridPowerW),
+        escapeCsv(row.plts?.gridVoltageV),
+        escapeCsv(row.plts?.gridFrequencyHz),
+        escapeCsv(row.plts?.isGridAvailable),
+        escapeCsv(row.plts?.isGridActive),
+        escapeCsv(row.plts?.batteryDirection),
+        escapeCsv(row.plts?.gridDirection),
+        escapeCsv(row.plts?.connected),
+        escapeCsv(row.plts?.lastUpdated),
+      ]);
+
+      const csv = '\ufeff' + [
+        headers.join(','),
+        ...csvRows.map((row) => row.join(',')),
+      ].join('\r\n');
+
+      const filename = `telemetri-nilasense-${days}hari-${new Date().toISOString().slice(0, 10)}.csv`;
+
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.send(csv);
+    } catch (error: any) {
+      res.status(500).json({
+        success: false,
+        error: error?.message || 'Gagal export CSV',
+      });
+    }
   });
 
   app.get('/api/telemetry/mqtt-status', (req, res) => {
@@ -231,7 +461,7 @@ async function startServer() {
       })}\n\n`);
     };
 
-    const onStatus = (status: any) => {
+    const onStatus = (_status: any) => {
       res.write(`data: ${JSON.stringify({
         type: 'status',
         mqttStatus: mqttService.getStatus(),
@@ -319,10 +549,23 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const httpServer = app.listen(PORT, '0.0.0.0', () => {
     console.log(`[NilaSense Server] Running on http://0.0.0.0:${PORT}`);
-    console.log(`[NilaSense Server] MQTT Target: broker.emqx.io:1883 | Topic: aquaculture/nila/data/nila-E0F908/telemetry`);
+    console.log('[NilaSense Server] MongoDB:', databaseService.isConnected ? 'CONNECTED' : 'DISCONNECTED');
+    console.log('[NilaSense Server] MQTT Target: broker.emqx.io:1883 | Topic: aquaculture/nila/data/nila-E0F908/telemetry');
   });
+
+  const shutdown = async () => {
+    clearInterval(databaseTimer);
+    await databaseService.disconnect();
+    httpServer.close(() => process.exit(0));
+  };
+
+  process.on('SIGTERM', () => void shutdown());
+  process.on('SIGINT', () => void shutdown());
 }
 
-startServer();
+startServer().catch((error) => {
+  console.error('[NilaSense Server] Fatal startup error:', error);
+  process.exit(1);
+});
