@@ -22,7 +22,7 @@ import {
 import * as XLSX from 'xlsx';
 import { TelemetryData, PltsSummary, ThresholdSettings } from '../types';
 
-type RangeDays = 1 | 7 | 30;
+type RangeMode = '1d' | '7d' | '30d' | 'custom';
 
 type PersistedTelemetry = TelemetryData & {
   _id?: string;
@@ -71,27 +71,50 @@ interface TelemetryChartsProps {
   thresholds: ThresholdSettings;
 }
 
-const RANGE_OPTIONS: Array<{ days: RangeDays; label: string }> = [
-  { days: 1, label: '1 Hari' },
-  { days: 7, label: '7 Hari' },
-  { days: 30, label: '30 Hari' },
+const RANGE_OPTIONS: Array<{ mode: RangeMode; label: string }> = [
+  { mode: '1d', label: '1 Hari' },
+  { mode: '7d', label: '7 Hari' },
+  { mode: '30d', label: '30 Hari' },
+  { mode: 'custom', label: 'Custom' },
 ];
 
-function formatRecordedTime(item: PersistedTelemetry, days: RangeDays) {
+function jakartaDateInputValue(date = new Date()): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Jakarta',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+
+  const year = parts.find((part) => part.type === 'year')?.value || '';
+  const month = parts.find((part) => part.type === 'month')?.value || '';
+  const day = parts.find((part) => part.type === 'day')?.value || '';
+  return `${year}-${month}-${day}`;
+}
+
+function formatDateLabel(value: string): string {
+  if (!value) return '-';
+  const [year, month, day] = value.split('-');
+  return `${day}/${month}/${year}`;
+}
+
+function formatRecordedTime(item: PersistedTelemetry, compact: boolean) {
   const raw = item.recordedAt || item.received_at;
   if (!raw) return item.timestamp || '-';
 
   const date = new Date(raw);
   if (Number.isNaN(date.getTime())) return item.timestamp || '-';
 
-  if (days === 1) {
+  if (compact) {
     return date.toLocaleTimeString('id-ID', {
+      timeZone: 'Asia/Jakarta',
       hour: '2-digit',
       minute: '2-digit',
     });
   }
 
   return date.toLocaleString('id-ID', {
+    timeZone: 'Asia/Jakarta',
     day: '2-digit',
     month: '2-digit',
     hour: '2-digit',
@@ -109,12 +132,31 @@ export const TelemetryCharts: React.FC<TelemetryChartsProps> = ({
   history: liveHistory,
   thresholds,
 }) => {
-  const [selectedRange, setSelectedRange] = useState<RangeDays>(1);
+  const today = useMemo(() => jakartaDateInputValue(), []);
+  const [rangeMode, setRangeMode] = useState<RangeMode>('1d');
+  const [fromDate, setFromDate] = useState(today);
+  const [toDate, setToDate] = useState(today);
+  const [appliedFromDate, setAppliedFromDate] = useState(today);
+  const [appliedToDate, setAppliedToDate] = useState(today);
   const [history, setHistory] = useState<PersistedTelemetry[]>([]);
   const [stats, setStats] = useState<TelemetryStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [source, setSource] = useState<'mongodb' | 'memory' | string>('mongodb');
   const [error, setError] = useState<string | null>(null);
+
+  const rangeQuery = useMemo(() => {
+    if (rangeMode === '1d') return 'days=1';
+    if (rangeMode === '7d') return 'days=7';
+    if (rangeMode === '30d') return 'days=30';
+    return `from=${encodeURIComponent(appliedFromDate)}&to=${encodeURIComponent(appliedToDate)}`;
+  }, [rangeMode, appliedFromDate, appliedToDate]);
+
+  const rangeLabel = useMemo(() => {
+    if (rangeMode === '1d') return '1 hari terakhir';
+    if (rangeMode === '7d') return '7 hari terakhir';
+    if (rangeMode === '30d') return '30 hari terakhir';
+    return `${formatDateLabel(appliedFromDate)} s.d. ${formatDateLabel(appliedToDate)}`;
+  }, [rangeMode, appliedFromDate, appliedToDate]);
 
   const loadHistory = async () => {
     setLoading(true);
@@ -122,22 +164,17 @@ export const TelemetryCharts: React.FC<TelemetryChartsProps> = ({
 
     try {
       const [historyResponse, statsResponse] = await Promise.all([
-        fetch(`/api/telemetry/history?days=${selectedRange}&limit=10000`),
-        fetch(`/api/telemetry/stats?days=${selectedRange}`),
+        fetch(`/api/telemetry/history?${rangeQuery}&limit=10000`),
+        fetch(`/api/telemetry/stats?${rangeQuery}`),
       ]);
 
       if (!historyResponse.ok) {
-        throw new Error(`History HTTP ${historyResponse.status}`);
+        const json = await historyResponse.json().catch(() => ({}));
+        throw new Error(json.error || `History HTTP ${historyResponse.status}`);
       }
 
       const historyJson = await historyResponse.json();
-
-      if (Array.isArray(historyJson.history)) {
-        setHistory(historyJson.history);
-      } else {
-        setHistory([]);
-      }
-
+      setHistory(Array.isArray(historyJson.history) ? historyJson.history : []);
       setSource(historyJson.source || 'mongodb');
 
       if (statsResponse.ok) {
@@ -148,7 +185,10 @@ export const TelemetryCharts: React.FC<TelemetryChartsProps> = ({
       }
     } catch (err: any) {
       console.error('MongoDB analytics load error:', err);
-      setError('Data MongoDB belum dapat dibaca. Menampilkan buffer data live sementara.');
+      setError(
+        err?.message ||
+          'Data MongoDB belum dapat dibaca. Menampilkan buffer data live sementara.'
+      );
       setHistory(liveHistory as PersistedTelemetry[]);
       setSource('memory');
       setStats(null);
@@ -160,13 +200,52 @@ export const TelemetryCharts: React.FC<TelemetryChartsProps> = ({
   useEffect(() => {
     void loadHistory();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedRange]);
+  }, [rangeQuery]);
+
+  const applyCustomRange = () => {
+    setError(null);
+
+    if (!fromDate || !toDate) {
+      setError('Tanggal awal dan tanggal akhir wajib diisi.');
+      return;
+    }
+
+    if (fromDate > toDate) {
+      setError('Tanggal awal tidak boleh setelah tanggal akhir.');
+      return;
+    }
+
+    const from = new Date(`${fromDate}T00:00:00+07:00`);
+    const to = new Date(`${toDate}T00:00:00+07:00`);
+    const days = Math.floor((to.getTime() - from.getTime()) / 86400000) + 1;
+
+    if (!Number.isFinite(days) || days < 1) {
+      setError('Rentang tanggal tidak valid.');
+      return;
+    }
+
+    if (days > 366) {
+      setError('Rentang tanggal custom maksimal 366 hari.');
+      return;
+    }
+
+    setAppliedFromDate(fromDate);
+    setAppliedToDate(toDate);
+
+    if (fromDate === appliedFromDate && toDate === appliedToDate) {
+      void loadHistory();
+    }
+  };
 
   const chartData = useMemo(
     () =>
       history.map((item, index) => ({
         index,
-        time: formatRecordedTime(item, selectedRange),
+        time: formatRecordedTime(
+          item,
+          rangeMode === '1d' ||
+            (rangeMode === 'custom' && appliedFromDate === appliedToDate)
+        ),
         recordedAt: item.recordedAt || item.received_at || item.timestamp,
         ph: valueOrNull(item.ph, 2),
         dissolvedOxygen: valueOrNull(item.do_mg_l, 2),
@@ -178,20 +257,23 @@ export const TelemetryCharts: React.FC<TelemetryChartsProps> = ({
         gridAvailable: item.plts?.isGridAvailable === true ? 1 : 0,
         gridActive: item.plts?.isGridActive === true ? 1 : 0,
       })),
-    [history, selectedRange]
+    [history, rangeMode, appliedFromDate, appliedToDate]
   );
 
   const exportCsv = () => {
-    window.location.href = `/api/telemetry/export.csv?days=${selectedRange}`;
+    window.location.href = `/api/telemetry/export.csv?${rangeQuery}`;
   };
 
   const exportExcel = () => {
     if (history.length === 0) return;
 
     const worksheetRows = history.map((row) => ({
-      'Waktu Rekam': row.recordedAt
-        ? new Date(row.recordedAt).toLocaleString('id-ID')
+      'Waktu Rekam WIB': row.recordedAt
+        ? new Date(row.recordedAt).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' })
         : row.received_at || row.timestamp,
+      'Recorded At UTC': row.recordedAt
+        ? new Date(row.recordedAt).toISOString()
+        : row.received_at || '',
       'Timestamp Device': row.timestamp,
       Device: row.device,
       pH: row.ph,
@@ -213,17 +295,33 @@ export const TelemetryCharts: React.FC<TelemetryChartsProps> = ({
       'Daya PLN W': row.plts?.gridPowerW ?? '',
       'Tegangan PLN V': row.plts?.gridVoltageV ?? '',
       'Frekuensi PLN Hz': row.plts?.gridFrequencyHz ?? '',
-      'PLN Tersedia': row.plts?.isGridAvailable === true ? 'Ya' : row.plts?.isGridAvailable === false ? 'Tidak' : '',
-      'PLN Aktif/Aliran': row.plts?.isGridActive === true ? 'Ya' : row.plts?.isGridActive === false ? 'Tidak' : '',
+      'PLN Tersedia':
+        row.plts?.isGridAvailable === true
+          ? 'Ya'
+          : row.plts?.isGridAvailable === false
+          ? 'Tidak'
+          : '',
+      'PLN Aktif/Aliran':
+        row.plts?.isGridActive === true
+          ? 'Ya'
+          : row.plts?.isGridActive === false
+          ? 'Tidak'
+          : '',
       'Arah Baterai': row.plts?.batteryDirection ?? '',
       'Arah PLN': row.plts?.gridDirection ?? '',
-      'PLTS Connected': row.plts?.connected === true ? 'Ya' : row.plts?.connected === false ? 'Tidak' : '',
+      'PLTS Connected':
+        row.plts?.connected === true
+          ? 'Ya'
+          : row.plts?.connected === false
+          ? 'Tidak'
+          : '',
       'Update PLTS': row.plts?.lastUpdated ?? '',
     }));
 
     const worksheet = XLSX.utils.json_to_sheet(worksheetRows);
     worksheet['!cols'] = [
       { wch: 22 },
+      { wch: 26 },
       { wch: 20 },
       { wch: 18 },
       { wch: 10 },
@@ -241,13 +339,14 @@ export const TelemetryCharts: React.FC<TelemetryChartsProps> = ({
     ];
 
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, `Telemetri ${selectedRange} Hari`);
-    XLSX.writeFile(
-      workbook,
-      `telemetri-nilasense-${selectedRange}hari-${new Date()
-        .toISOString()
-        .slice(0, 10)}.xlsx`
-    );
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Telemetri');
+
+    const filename =
+      rangeMode === 'custom'
+        ? `telemetri-nilasense-${appliedFromDate}-sd-${appliedToDate}.xlsx`
+        : `telemetri-nilasense-${rangeMode === '1d' ? '1' : rangeMode === '7d' ? '7' : '30'}hari-${today}.xlsx`;
+
+    XLSX.writeFile(workbook, filename);
   };
 
   const statCards = [
@@ -305,48 +404,83 @@ export const TelemetryCharts: React.FC<TelemetryChartsProps> = ({
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="flex bg-[#020617] p-1 rounded-xl border border-slate-800">
-              {RANGE_OPTIONS.map((option) => (
-                <button
-                  key={option.days}
-                  onClick={() => setSelectedRange(option.days)}
-                  className={`px-3.5 py-2 rounded-lg text-xs font-semibold transition-all ${
-                    selectedRange === option.days
-                      ? 'bg-cyan-600 text-white'
-                      : 'text-slate-400 hover:text-white hover:bg-slate-800'
-                  }`}
-                >
-                  {option.label}
-                </button>
-              ))}
+          <div className="flex flex-col gap-3 xl:items-end">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex flex-wrap bg-[#020617] p-1 rounded-xl border border-slate-800">
+                {RANGE_OPTIONS.map((option) => (
+                  <button
+                    key={option.mode}
+                    onClick={() => setRangeMode(option.mode)}
+                    className={`px-3.5 py-2 rounded-lg text-xs font-semibold transition-all ${
+                      rangeMode === option.mode
+                        ? 'bg-cyan-600 text-white'
+                        : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                    }`}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+
+              <button
+                onClick={() => void loadHistory()}
+                disabled={loading}
+                className="flex items-center gap-1.5 px-3.5 py-2.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white rounded-xl text-xs font-semibold border border-slate-700"
+              >
+                <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+                Refresh
+              </button>
+
+              <button
+                onClick={exportCsv}
+                className="flex items-center gap-1.5 px-3.5 py-2.5 bg-emerald-700 hover:bg-emerald-600 text-white rounded-xl text-xs font-semibold"
+              >
+                <Download className="w-4 h-4" />
+                CSV
+              </button>
+
+              <button
+                onClick={exportExcel}
+                disabled={history.length === 0}
+                className="flex items-center gap-1.5 px-3.5 py-2.5 bg-green-700 hover:bg-green-600 disabled:opacity-50 text-white rounded-xl text-xs font-semibold"
+              >
+                <FileSpreadsheet className="w-4 h-4" />
+                Excel
+              </button>
             </div>
 
-            <button
-              onClick={() => void loadHistory()}
-              disabled={loading}
-              className="flex items-center gap-1.5 px-3.5 py-2.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white rounded-xl text-xs font-semibold border border-slate-700"
-            >
-              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-              Refresh
-            </button>
+            {rangeMode === 'custom' && (
+              <div className="flex flex-wrap items-end gap-2 p-3 bg-[#020617] border border-cyan-900/60 rounded-xl">
+                <label className="text-[11px] text-slate-400">
+                  <span className="block mb-1">Dari tanggal</span>
+                  <input
+                    type="date"
+                    value={fromDate}
+                    max={today}
+                    onChange={(e) => setFromDate(e.target.value)}
+                    className="px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-xs text-slate-200 focus:outline-none focus:border-cyan-500"
+                  />
+                </label>
 
-            <button
-              onClick={exportCsv}
-              className="flex items-center gap-1.5 px-3.5 py-2.5 bg-emerald-700 hover:bg-emerald-600 text-white rounded-xl text-xs font-semibold"
-            >
-              <Download className="w-4 h-4" />
-              CSV
-            </button>
+                <label className="text-[11px] text-slate-400">
+                  <span className="block mb-1">Sampai tanggal</span>
+                  <input
+                    type="date"
+                    value={toDate}
+                    max={today}
+                    onChange={(e) => setToDate(e.target.value)}
+                    className="px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-xs text-slate-200 focus:outline-none focus:border-cyan-500"
+                  />
+                </label>
 
-            <button
-              onClick={exportExcel}
-              disabled={history.length === 0}
-              className="flex items-center gap-1.5 px-3.5 py-2.5 bg-green-700 hover:bg-green-600 disabled:opacity-50 text-white rounded-xl text-xs font-semibold"
-            >
-              <FileSpreadsheet className="w-4 h-4" />
-              Excel
-            </button>
+                <button
+                  onClick={applyCustomRange}
+                  className="px-4 py-2 bg-cyan-700 hover:bg-cyan-600 text-white rounded-lg text-xs font-semibold"
+                >
+                  Terapkan Tanggal
+                </button>
+              </div>
+            )}
           </div>
         </div>
 
@@ -366,7 +500,7 @@ export const TelemetryCharts: React.FC<TelemetryChartsProps> = ({
             {loading ? '...' : stats?.count ?? history.length}
           </div>
           <div className="text-xs text-slate-500 mt-1">
-            rentang {selectedRange} hari
+            rentang {rangeLabel}
           </div>
         </div>
 
