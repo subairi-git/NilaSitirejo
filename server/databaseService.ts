@@ -240,10 +240,9 @@ class DatabaseService {
       .sort({ recordedAt: 1 });
   }
 
-  async getStats(days = 1, device?: string): Promise<TelemetryStats> {
+  async getStats(options?: TelemetryHistoryOptions): Promise<TelemetryStats> {
     const history = await this.getHistory({
-      days,
-      device,
+      ...options,
       limit: MAX_HISTORY_LIMIT,
     });
 
