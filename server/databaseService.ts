@@ -1,4 +1,5 @@
 import { Collection, Db, MongoClient } from 'mongodb';
+import type { Filter, FindCursor } from 'mongodb';
 import type { TelemetryPayload } from './mqttService';
 
 export interface PltsSnapshot {
@@ -49,6 +50,14 @@ export interface TelemetryStats {
     latestGridAvailable: boolean | null;
     latestGridActive: boolean | null;
   };
+}
+
+export interface TelemetryHistoryOptions {
+  days?: number;
+  from?: Date;
+  to?: Date;
+  limit?: number;
+  device?: string;
 }
 
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
@@ -122,7 +131,6 @@ class DatabaseService {
 
       this.isConnected = true;
       this.lastError = null;
-
       console.log(`[MongoDB] Connected: database=${dbName}, collection=telemetry`);
     } catch (error: any) {
       this.isConnected = false;
@@ -134,6 +142,27 @@ class DatabaseService {
   private getBucket5m(date = new Date()): Date {
     const bucketMs = Math.floor(date.getTime() / FIVE_MINUTES_MS) * FIVE_MINUTES_MS;
     return new Date(bucketMs);
+  }
+
+  private buildHistoryQuery(options?: TelemetryHistoryOptions): Filter<TelemetryDocument> {
+    const query: Filter<TelemetryDocument> = {};
+
+    if (options?.from || options?.to) {
+      const recordedAt: { $gte?: Date; $lt?: Date } = {};
+      if (options.from) recordedAt.$gte = options.from;
+      if (options.to) recordedAt.$lt = options.to;
+      query.recordedAt = recordedAt;
+    } else {
+      const days = normalizeDays(Number(options?.days || 1));
+      const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+      query.recordedAt = { $gte: since };
+    }
+
+    if (options?.device) {
+      query.device = options.device;
+    }
+
+    return query;
   }
 
   async saveTelemetryIfDue(
@@ -164,8 +193,8 @@ class DatabaseService {
         this.lastSavedAt = now;
         console.log(
           `[MongoDB] Snapshot tersimpan: device=${data.device}, bucket=${bucket5m.toISOString()}, ` +
-          `PV=${plts?.pvPowerW ?? 'NA'}W, Battery=${plts?.batterySocPct ?? 'NA'}%, ` +
-          `Load=${plts?.loadPowerW ?? 'NA'}W, PLN=${plts?.isGridAvailable ?? 'NA'}`
+            `PV=${plts?.pvPowerW ?? 'NA'}W, Battery=${plts?.batterySocPct ?? 'NA'}%, ` +
+            `Load=${plts?.loadPowerW ?? 'NA'}W, PLN=${plts?.isGridAvailable ?? 'NA'}`
         );
         return true;
       }
@@ -179,32 +208,36 @@ class DatabaseService {
     }
   }
 
-  async getHistory(options?: {
-    days?: number;
-    limit?: number;
-    device?: string;
-  }): Promise<TelemetryDocument[]> {
+  async getHistory(options?: TelemetryHistoryOptions): Promise<TelemetryDocument[]> {
     if (!this.telemetryCollection || !this.isConnected) return [];
 
-    const days = normalizeDays(Number(options?.days || 1));
     const limit = Math.min(
       Math.max(Number(options?.limit || MAX_HISTORY_LIMIT), 1),
       MAX_HISTORY_LIMIT
     );
+    const query = this.buildHistoryQuery(options);
 
-    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-
-    const query: Record<string, unknown> = {
-      recordedAt: { $gte: since },
-    };
-
-    if (options?.device) query.device = options.device;
-
-    return this.telemetryCollection
+    // Ambil data terbaru jika rentang custom > 10.000 record, lalu kembalikan
+    // dalam urutan lama -> baru agar grafik/tabel tetap konsisten.
+    const rows = await this.telemetryCollection
       .find(query)
-      .sort({ recordedAt: 1 })
+      .sort({ recordedAt: -1 })
       .limit(limit)
       .toArray();
+
+    return rows.reverse();
+  }
+
+  async getHistoryCount(options?: TelemetryHistoryOptions): Promise<number> {
+    if (!this.telemetryCollection || !this.isConnected) return 0;
+    return this.telemetryCollection.countDocuments(this.buildHistoryQuery(options));
+  }
+
+  getHistoryCursor(options?: Omit<TelemetryHistoryOptions, 'limit'>): FindCursor<TelemetryDocument> | null {
+    if (!this.telemetryCollection || !this.isConnected) return null;
+    return this.telemetryCollection
+      .find(this.buildHistoryQuery(options))
+      .sort({ recordedAt: 1 });
   }
 
   async getStats(days = 1, device?: string): Promise<TelemetryStats> {
