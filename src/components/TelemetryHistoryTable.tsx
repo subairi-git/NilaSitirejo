@@ -11,7 +11,7 @@ import {
 import * as XLSX from 'xlsx';
 import { TelemetryData } from '../types';
 
-type RangeDays = 1 | 7 | 30;
+type RangeMode = 'today' | '7d' | '30d' | 'custom';
 
 type PersistedTelemetry = TelemetryData & {
   _id?: string;
@@ -38,36 +38,79 @@ interface TelemetryHistoryTableProps {
   history: TelemetryData[];
 }
 
-const RANGE_OPTIONS: Array<{ days: RangeDays; label: string }> = [
-  { days: 1, label: '1 Hari' },
-  { days: 7, label: '7 Hari' },
-  { days: 30, label: '30 Hari' },
+const RANGE_OPTIONS: Array<{ mode: RangeMode; label: string }> = [
+  { mode: 'today', label: 'Hari Ini' },
+  { mode: '7d', label: '7 Hari' },
+  { mode: '30d', label: '30 Hari' },
+  { mode: 'custom', label: 'Custom' },
 ];
+
+function localDateInputValue(date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
 
 function displayDate(item: PersistedTelemetry): string {
   const raw = item.recordedAt || item.received_at;
   if (raw) {
     const date = new Date(raw);
     if (!Number.isNaN(date.getTime())) {
-      return date.toLocaleString('id-ID');
+      return date.toLocaleString('id-ID', {
+        timeZone: 'Asia/Jakarta',
+      });
     }
   }
   return item.timestamp || '-';
 }
 
+function formatDateLabel(value: string): string {
+  if (!value) return '-';
+  const [year, month, day] = value.split('-');
+  return `${day}/${month}/${year}`;
+}
+
+function safeFilenameDate(value: string): string {
+  return value || localDateInputValue();
+}
+
 export const TelemetryHistoryTable: React.FC<TelemetryHistoryTableProps> = ({
   history: liveHistory,
 }) => {
+  const today = useMemo(() => localDateInputValue(), []);
+
   const [history, setHistory] = useState<PersistedTelemetry[]>([]);
-  const [selectedRange, setSelectedRange] = useState<RangeDays>(1);
+  const [rangeMode, setRangeMode] = useState<RangeMode>('today');
+  const [fromDate, setFromDate] = useState(today);
+  const [toDate, setToDate] = useState(today);
+  const [appliedFromDate, setAppliedFromDate] = useState(today);
+  const [appliedToDate, setAppliedToDate] = useState(today);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterStatus, setFilterStatus] = useState<'all' | 'normal' | 'error'>('all');
   const [page, setPage] = useState(1);
   const [source, setSource] = useState<string>('mongodb');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
+  const [totalCount, setTotalCount] = useState(0);
+  const [truncated, setTruncated] = useState(false);
   const itemsPerPage = 20;
+
+  const rangeQuery = useMemo(() => {
+    if (rangeMode === 'today') {
+      return `from=${encodeURIComponent(today)}&to=${encodeURIComponent(today)}`;
+    }
+    if (rangeMode === '7d') return 'days=7';
+    if (rangeMode === '30d') return 'days=30';
+    return `from=${encodeURIComponent(appliedFromDate)}&to=${encodeURIComponent(appliedToDate)}`;
+  }, [rangeMode, today, appliedFromDate, appliedToDate]);
+
+  const rangeLabel = useMemo(() => {
+    if (rangeMode === 'today') return `hari ini (${formatDateLabel(today)})`;
+    if (rangeMode === '7d') return '7 hari terakhir';
+    if (rangeMode === '30d') return '30 hari terakhir';
+    return `${formatDateLabel(appliedFromDate)} s.d. ${formatDateLabel(appliedToDate)}`;
+  }, [rangeMode, today, appliedFromDate, appliedToDate]);
 
   const loadHistory = async () => {
     setLoading(true);
@@ -75,22 +118,30 @@ export const TelemetryHistoryTable: React.FC<TelemetryHistoryTableProps> = ({
 
     try {
       const response = await fetch(
-        `/api/telemetry/history?days=${selectedRange}&limit=10000`
+        `/api/telemetry/history?${rangeQuery}&limit=10000`
       );
 
+      const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+        throw new Error(data.error || `HTTP ${response.status}`);
       }
 
-      const data = await response.json();
-      setHistory(Array.isArray(data.history) ? data.history : []);
+      const rows = Array.isArray(data.history) ? data.history : [];
+      setHistory(rows);
       setSource(data.source || 'mongodb');
+      setTotalCount(Number.isFinite(data.totalCount) ? data.totalCount : rows.length);
+      setTruncated(Boolean(data.truncated));
       setPage(1);
-    } catch (err) {
+    } catch (err: any) {
       console.error('History database error:', err);
       setHistory(liveHistory as PersistedTelemetry[]);
       setSource('memory');
-      setError('MongoDB belum dapat diakses. Tabel sementara memakai data live di memory.');
+      setTotalCount(liveHistory.length);
+      setTruncated(false);
+      setError(
+        err?.message ||
+          'MongoDB belum dapat diakses. Tabel sementara memakai data live di memory.'
+      );
     } finally {
       setLoading(false);
     }
@@ -99,7 +150,37 @@ export const TelemetryHistoryTable: React.FC<TelemetryHistoryTableProps> = ({
   useEffect(() => {
     void loadHistory();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedRange]);
+  }, [rangeQuery]);
+
+  const applyCustomRange = () => {
+    setError(null);
+
+    if (!fromDate || !toDate) {
+      setError('Tanggal awal dan tanggal akhir wajib diisi.');
+      return;
+    }
+
+    if (fromDate > toDate) {
+      setError('Tanggal awal tidak boleh setelah tanggal akhir.');
+      return;
+    }
+
+    const from = new Date(`${fromDate}T00:00:00+07:00`);
+    const to = new Date(`${toDate}T00:00:00+07:00`);
+    const days = Math.floor((to.getTime() - from.getTime()) / 86400000) + 1;
+    if (days > 366) {
+      setError('Rentang tanggal custom maksimal 366 hari.');
+      return;
+    }
+
+    setAppliedFromDate(fromDate);
+    setAppliedToDate(toDate);
+
+    // Bila tanggal sama dengan range yang sudah diterapkan, paksa refresh manual.
+    if (fromDate === appliedFromDate && toDate === appliedToDate) {
+      void loadHistory();
+    }
+  };
 
   const filteredHistory = useMemo(
     () =>
@@ -129,20 +210,27 @@ export const TelemetryHistoryTable: React.FC<TelemetryHistoryTableProps> = ({
 
   const totalPages = Math.max(1, Math.ceil(filteredHistory.length / itemsPerPage));
 
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
+
   const currentItems = filteredHistory
     .slice()
     .reverse()
     .slice((page - 1) * itemsPerPage, page * itemsPerPage);
 
   const exportCsv = () => {
-    window.location.href = `/api/telemetry/export.csv?days=${selectedRange}`;
+    window.location.href = `/api/telemetry/export.csv?${rangeQuery}`;
   };
 
   const exportExcel = () => {
-    if (filteredHistory.length === 0) return;
+    if (history.length === 0) return;
 
-    const rows = filteredHistory.map((row) => ({
-      'Waktu Rekam': displayDate(row),
+    const rows = history.map((row) => ({
+      'Waktu Rekam WIB': displayDate(row),
+      'Recorded At UTC': row.recordedAt
+        ? new Date(row.recordedAt).toISOString()
+        : row.received_at || '',
       'Timestamp Device': row.timestamp,
       Device: row.device,
       pH: row.ph,
@@ -164,17 +252,33 @@ export const TelemetryHistoryTable: React.FC<TelemetryHistoryTableProps> = ({
       'Daya PLN W': row.plts?.gridPowerW ?? '',
       'Tegangan PLN V': row.plts?.gridVoltageV ?? '',
       'Frekuensi PLN Hz': row.plts?.gridFrequencyHz ?? '',
-      'PLN Tersedia': row.plts?.isGridAvailable === true ? 'Ya' : row.plts?.isGridAvailable === false ? 'Tidak' : '',
-      'PLN Aktif/Aliran': row.plts?.isGridActive === true ? 'Ya' : row.plts?.isGridActive === false ? 'Tidak' : '',
+      'PLN Tersedia':
+        row.plts?.isGridAvailable === true
+          ? 'Ya'
+          : row.plts?.isGridAvailable === false
+          ? 'Tidak'
+          : '',
+      'PLN Aktif/Aliran':
+        row.plts?.isGridActive === true
+          ? 'Ya'
+          : row.plts?.isGridActive === false
+          ? 'Tidak'
+          : '',
       'Arah Baterai': row.plts?.batteryDirection ?? '',
       'Arah PLN': row.plts?.gridDirection ?? '',
-      'PLTS Connected': row.plts?.connected === true ? 'Ya' : row.plts?.connected === false ? 'Tidak' : '',
+      'PLTS Connected':
+        row.plts?.connected === true
+          ? 'Ya'
+          : row.plts?.connected === false
+          ? 'Tidak'
+          : '',
       'Update PLTS': row.plts?.lastUpdated ?? '',
     }));
 
     const sheet = XLSX.utils.json_to_sheet(rows);
     sheet['!cols'] = [
       { wch: 22 },
+      { wch: 26 },
       { wch: 20 },
       { wch: 18 },
       { wch: 10 },
@@ -193,18 +297,21 @@ export const TelemetryHistoryTable: React.FC<TelemetryHistoryTableProps> = ({
 
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, sheet, 'Telemetry');
-    XLSX.writeFile(
-      workbook,
-      `log-telemetri-nilasense-${selectedRange}hari-${new Date()
-        .toISOString()
-        .slice(0, 10)}.xlsx`
-    );
+
+    const filename =
+      rangeMode === 'custom'
+        ? `log-telemetri-nilasense-${safeFilenameDate(appliedFromDate)}-sd-${safeFilenameDate(appliedToDate)}.xlsx`
+        : rangeMode === 'today'
+        ? `log-telemetri-nilasense-hari-ini-${today}.xlsx`
+        : `log-telemetri-nilasense-${rangeMode === '7d' ? '7' : '30'}hari-${today}.xlsx`;
+
+    XLSX.writeFile(workbook, filename);
   };
 
   return (
     <div className="space-y-6">
       <div className="bg-[#0f172a]/90 backdrop-blur-xl border border-slate-800/90 rounded-2xl p-6 shadow-[0_8px_30px_rgb(0,0,0,0.5)]">
-        <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
+        <div className="flex flex-col xl:flex-row xl:items-start justify-between gap-5">
           <div>
             <div className="flex flex-wrap items-center gap-2 mb-2">
               <span className="px-3 py-1 rounded-full text-xs font-bold bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 flex items-center gap-1.5">
@@ -229,52 +336,96 @@ export const TelemetryHistoryTable: React.FC<TelemetryHistoryTableProps> = ({
             <p className="text-xs text-slate-400 mt-1">
               {loading
                 ? 'Memuat data...'
-                : `${filteredHistory.length} catatan pada rentang ${selectedRange} hari.`}
+                : `${filteredHistory.length.toLocaleString('id-ID')} catatan tampil untuk ${rangeLabel}.`}
             </p>
+
+            {!loading && totalCount > 0 && (
+              <p className="text-[11px] text-slate-500 mt-1">
+                Database: {totalCount.toLocaleString('id-ID')} snapshot pada periode ini.
+                {truncated
+                  ? ' Tabel menampilkan maksimal 10.000 snapshot terbaru; CSV tetap mengunduh seluruh data pada periode terpilih.'
+                  : ''}
+              </p>
+            )}
           </div>
 
-          <div className="flex flex-wrap gap-2">
-            <div className="flex bg-[#020617] p-1 rounded-xl border border-slate-800">
-              {RANGE_OPTIONS.map((option) => (
-                <button
-                  key={option.days}
-                  onClick={() => setSelectedRange(option.days)}
-                  className={`px-3 py-2 rounded-lg text-xs font-semibold transition-all ${
-                    selectedRange === option.days
-                      ? 'bg-cyan-600 text-white'
-                      : 'text-slate-400 hover:text-white hover:bg-slate-800'
-                  }`}
-                >
-                  {option.label}
-                </button>
-              ))}
+          <div className="flex flex-col gap-3 xl:items-end">
+            <div className="flex flex-wrap gap-2">
+              <div className="flex flex-wrap bg-[#020617] p-1 rounded-xl border border-slate-800">
+                {RANGE_OPTIONS.map((option) => (
+                  <button
+                    key={option.mode}
+                    onClick={() => setRangeMode(option.mode)}
+                    className={`px-3 py-2 rounded-lg text-xs font-semibold transition-all ${
+                      rangeMode === option.mode
+                        ? 'bg-cyan-600 text-white'
+                        : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                    }`}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+
+              <button
+                onClick={() => void loadHistory()}
+                disabled={loading}
+                className="flex items-center gap-1.5 px-3.5 py-2.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white rounded-xl text-xs font-semibold border border-slate-700"
+              >
+                <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+                Refresh
+              </button>
+
+              <button
+                onClick={exportCsv}
+                className="flex items-center gap-1.5 px-3.5 py-2.5 bg-emerald-700 hover:bg-emerald-600 text-white rounded-xl text-xs font-semibold"
+              >
+                <Download className="w-4 h-4" />
+                CSV
+              </button>
+
+              <button
+                onClick={exportExcel}
+                disabled={history.length === 0}
+                className="flex items-center gap-1.5 px-3.5 py-2.5 bg-green-700 hover:bg-green-600 disabled:opacity-50 text-white rounded-xl text-xs font-semibold"
+              >
+                <FileSpreadsheet className="w-4 h-4" />
+                Excel
+              </button>
             </div>
 
-            <button
-              onClick={() => void loadHistory()}
-              disabled={loading}
-              className="flex items-center gap-1.5 px-3.5 py-2.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white rounded-xl text-xs font-semibold border border-slate-700"
-            >
-              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-              Refresh
-            </button>
+            {rangeMode === 'custom' && (
+              <div className="flex flex-wrap items-end gap-2 p-3 bg-[#020617] border border-slate-800 rounded-xl">
+                <label className="text-[11px] text-slate-400">
+                  <span className="block mb-1">Dari tanggal</span>
+                  <input
+                    type="date"
+                    value={fromDate}
+                    max={today}
+                    onChange={(e) => setFromDate(e.target.value)}
+                    className="px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-xs text-slate-200 focus:outline-none focus:border-cyan-500"
+                  />
+                </label>
 
-            <button
-              onClick={exportCsv}
-              className="flex items-center gap-1.5 px-3.5 py-2.5 bg-emerald-700 hover:bg-emerald-600 text-white rounded-xl text-xs font-semibold"
-            >
-              <Download className="w-4 h-4" />
-              CSV
-            </button>
+                <label className="text-[11px] text-slate-400">
+                  <span className="block mb-1">Sampai tanggal</span>
+                  <input
+                    type="date"
+                    value={toDate}
+                    max={today}
+                    onChange={(e) => setToDate(e.target.value)}
+                    className="px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-xs text-slate-200 focus:outline-none focus:border-cyan-500"
+                  />
+                </label>
 
-            <button
-              onClick={exportExcel}
-              disabled={filteredHistory.length === 0}
-              className="flex items-center gap-1.5 px-3.5 py-2.5 bg-green-700 hover:bg-green-600 disabled:opacity-50 text-white rounded-xl text-xs font-semibold"
-            >
-              <FileSpreadsheet className="w-4 h-4" />
-              Excel
-            </button>
+                <button
+                  onClick={applyCustomRange}
+                  className="px-3.5 py-2 bg-cyan-700 hover:bg-cyan-600 text-white rounded-lg text-xs font-semibold"
+                >
+                  Terapkan
+                </button>
+              </div>
+            )}
           </div>
         </div>
 
@@ -387,24 +538,21 @@ export const TelemetryHistoryTable: React.FC<TelemetryHistoryTableProps> = ({
                             : 'bg-red-950 text-red-300 border border-red-800/80'
                         }`}
                       >
-                        {item.modbus_code === 0
-                          ? 'OK'
-                          : `Err ${item.modbus_code}`}
+                        {item.modbus_code === 0 ? 'OK' : `Err ${item.modbus_code}`}
                       </span>
                     </td>
                     <td className="py-3 px-4 whitespace-nowrap">
                       {item.wifi_rssi ?? '--'} dBm
                     </td>
-                    <td className="py-3 px-4 text-slate-400">
-                      {item.ip || '--'}
-                    </td>
+                    <td className="py-3 px-4 text-slate-400">{item.ip || '--'}</td>
                     <td className="py-3 px-4 text-yellow-300 whitespace-nowrap">
                       {item.plts?.pvPowerW !== null && item.plts?.pvPowerW !== undefined
                         ? `${item.plts.pvPowerW.toFixed(1)} W`
                         : '--'}
                     </td>
                     <td className="py-3 px-4 text-emerald-300 whitespace-nowrap">
-                      {item.plts?.batterySocPct !== null && item.plts?.batterySocPct !== undefined
+                      {item.plts?.batterySocPct !== null &&
+                      item.plts?.batterySocPct !== undefined
                         ? `${item.plts.batterySocPct.toFixed(1)}%`
                         : '--'}
                     </td>
@@ -414,14 +562,20 @@ export const TelemetryHistoryTable: React.FC<TelemetryHistoryTableProps> = ({
                         : '--'}
                     </td>
                     <td className="py-3 px-4 whitespace-nowrap">
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                        item.plts?.isGridAvailable === true
-                          ? 'bg-emerald-950 text-emerald-300 border border-emerald-800/80'
+                      <span
+                        className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                          item.plts?.isGridAvailable === true
+                            ? 'bg-emerald-950 text-emerald-300 border border-emerald-800/80'
+                            : item.plts?.isGridAvailable === false
+                            ? 'bg-slate-900 text-slate-400 border border-slate-700'
+                            : 'bg-slate-900 text-slate-500 border border-slate-800'
+                        }`}
+                      >
+                        {item.plts?.isGridAvailable === true
+                          ? 'TERSEDIA'
                           : item.plts?.isGridAvailable === false
-                          ? 'bg-slate-900 text-slate-400 border border-slate-700'
-                          : 'bg-slate-900 text-slate-500 border border-slate-800'
-                      }`}>
-                        {item.plts?.isGridAvailable === true ? 'TERSEDIA' : item.plts?.isGridAvailable === false ? 'OFF' : '--'}
+                          ? 'OFF'
+                          : '--'}
                       </span>
                     </td>
                   </tr>
@@ -459,9 +613,7 @@ export const TelemetryHistoryTable: React.FC<TelemetryHistoryTableProps> = ({
 
             <button
               disabled={page >= totalPages}
-              onClick={() =>
-                setPage((value) => Math.min(totalPages, value + 1))
-              }
+              onClick={() => setPage((value) => Math.min(totalPages, value + 1))}
               className="p-1.5 bg-[#0f172a] hover:bg-slate-800 disabled:opacity-40 text-slate-300 rounded-lg border border-slate-800"
             >
               <ChevronRight className="w-4 h-4" />
