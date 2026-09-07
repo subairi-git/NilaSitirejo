@@ -441,11 +441,12 @@ async function startServer() {
 
   app.get('/api/telemetry/stats', async (req, res) => {
     try {
-      const days = normalizeDays(req.query.days);
+      const range = parseTelemetryRange(req.query);
       const device =
         typeof req.query.device === 'string' ? req.query.device : undefined;
+      const dbOptions = rangeToDatabaseOptions(range, device);
       const stats = databaseService.isConnected
-        ? await databaseService.getStats(days, device)
+        ? await databaseService.getStats(dbOptions)
         : {
             count: 0,
             firstRecordedAt: null,
@@ -467,12 +468,15 @@ async function startServer() {
 
       res.json({
         success: true,
-        days,
+        days: range.custom ? null : range.days,
+        from: range.fromText || null,
+        to: range.toText || null,
         source: databaseService.isConnected ? 'mongodb' : 'memory',
         stats,
       });
     } catch (error: any) {
-      res.status(500).json({
+      const status = error instanceof RangeValidationError ? 400 : 500;
+      res.status(status).json({
         success: false,
         error: error?.message || 'Gagal menghitung statistik',
       });
