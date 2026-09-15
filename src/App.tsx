@@ -13,6 +13,26 @@ import { UserProfileModal } from './components/UserProfileModal';
 import { SettingsModal } from './components/SettingsModal';
 import { TelemetryData, PltsSummary, User, ThresholdSettings } from './types';
 
+export interface MqttStatus {
+  connected: boolean;
+  broker?: string;
+  topic?: string;
+  cmdTopic?: string;
+  error?: string | null;
+  deviceStatus?: 'online' | 'offline' | 'unknown';
+  lastMessageTime?: number;
+  lastMessageAt?: string | null;
+  messageCount?: number;
+  lastTelemetryTime?: number;
+  lastTelemetryAt?: string | null;
+  telemetryAgeSec?: number | null;
+  telemetryState?: 'waiting' | 'live' | 'delayed' | 'stale';
+  telemetryFresh?: boolean;
+  simulationActive?: boolean;
+  historyCount?: number;
+  watchdogReconnectCount?: number;
+}
+
 const DEFAULT_THRESHOLDS: ThresholdSettings = {
   phMin: 6.0,
   phMax: 9.0,
@@ -27,15 +47,26 @@ const DEFAULT_THRESHOLDS: ThresholdSettings = {
   enableAudioAlerts: false,
 };
 
+function formatTelemetryAge(seconds?: number | null) {
+  if (seconds === null || seconds === undefined) return 'belum ada data sensor';
+  if (seconds < 60) return `${seconds} detik lalu`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} menit lalu`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} jam lalu`;
+  return `${Math.floor(seconds / 86400)} hari lalu`;
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<string>('overview');
   const [telemetry, setTelemetry] = useState<TelemetryData | null>(null);
   const [history, setHistory] = useState<TelemetryData[]>([]);
   const [pltsSummary, setPltsSummary] = useState<PltsSummary | null>(null);
-  const [mqttStatus, setMqttStatus] = useState<{ connected: boolean; broker?: string; topic?: string }>({
-    connected: true,
+  const [mqttStatus, setMqttStatus] = useState<MqttStatus>({
+    connected: false,
     broker: 'mqtt://broker.emqx.io:1883',
-    topic: 'aquaculture/nila/data/nila-E0F908/telemetry'
+    topic: 'aquaculture/nila/data/+/telemetry',
+    telemetryState: 'waiting',
+    telemetryFresh: false,
+    telemetryAgeSec: null,
   });
   const [simulationActive, setSimulationActive] = useState(false);
   const [user, setUser] = useState<User | null>(null);
@@ -63,24 +94,21 @@ export default function App() {
     }
   }, []);
 
-  // Fetch initial telemetry and history from backend
-  const fetchInitialData = useCallback(async () => {
+  // Live data only. cache:no-store mencegah browser/proxy memakai response lama.
+  const fetchLiveData = useCallback(async () => {
     try {
-      const [resTel, resHist, resPlts] = await Promise.allSettled([
-        fetch('/api/telemetry/latest'),
-        fetch('/api/telemetry/history?limit=100'),
-        fetch('/api/plts/summary')
+      const [resTel, resPlts] = await Promise.allSettled([
+        fetch('/api/telemetry/latest', { cache: 'no-store' }),
+        fetch('/api/plts/summary', { cache: 'no-store' }),
       ]);
 
       if (resTel.status === 'fulfilled' && resTel.value.ok) {
         const data = await resTel.value.json();
         if (data.telemetry) setTelemetry(data.telemetry);
-        if (data.mqttStatus) setMqttStatus(data.mqttStatus);
-      }
-
-      if (resHist.status === 'fulfilled' && resHist.value.ok) {
-        const data = await resHist.value.json();
-        if (Array.isArray(data.history)) setHistory(data.history);
+        if (data.mqttStatus) {
+          setMqttStatus(data.mqttStatus);
+          setSimulationActive(!!data.mqttStatus.simulationActive);
+        }
       }
 
       if (resPlts.status === 'fulfilled' && resPlts.value.ok) {
@@ -88,39 +116,63 @@ export default function App() {
         if (data.summary) setPltsSummary(data.summary);
       }
     } catch (err) {
-      console.error('Error fetching initial data:', err);
+      console.error('Error fetching live data:', err);
     }
   }, []);
 
-  // Connect to SSE Stream for live real-time push from MQTT
+  // Riwayat tidak perlu diminta setiap 8 detik. SSE akan menambahkan telemetry baru.
+  const fetchInitialHistory = useCallback(async () => {
+    try {
+      const response = await fetch('/api/telemetry/history?limit=100', {
+        cache: 'no-store',
+      });
+      if (!response.ok) return;
+      const data = await response.json();
+      if (Array.isArray(data.history)) setHistory(data.history);
+    } catch (err) {
+      console.error('Error fetching initial telemetry history:', err);
+    }
+  }, []);
+
+  // Connect to SSE Stream for live real-time push from MQTT.
   useEffect(() => {
-    fetchInitialData();
+    void fetchLiveData();
+    void fetchInitialHistory();
 
     let eventSource: EventSource | null = null;
     try {
       eventSource = new EventSource('/api/telemetry/stream');
-      
+
       eventSource.onmessage = (event) => {
         try {
           const parsed = JSON.parse(event.data);
+
           if (parsed.type === 'initial' || parsed.type === 'telemetry') {
             if (parsed.telemetry) {
               setTelemetry(parsed.telemetry);
-              setHistory(prev => {
-                const next = [...prev, parsed.telemetry];
-                return next.slice(-200);
-              });
+
+              // Hanya tambahkan event telemetry nyata; initial snapshot tidak perlu diduplikasi.
+              if (parsed.type === 'telemetry') {
+                setHistory((prev) => {
+                  const next = [...prev, parsed.telemetry];
+                  return next.slice(-200);
+                });
+              }
             }
+
             if (parsed.mqttStatus) {
               setMqttStatus(parsed.mqttStatus);
               setSimulationActive(!!parsed.mqttStatus.simulationActive);
             }
           }
+
           if (parsed.type === 'plts' && parsed.plts) {
             setPltsSummary(parsed.plts);
           }
+
           if (parsed.type === 'status' && parsed.mqttStatus) {
             setMqttStatus(parsed.mqttStatus);
+            setSimulationActive(!!parsed.mqttStatus.simulationActive);
           }
         } catch (e) {
           console.error('Error parsing SSE data:', e);
@@ -128,25 +180,30 @@ export default function App() {
       };
 
       eventSource.onerror = () => {
-        console.warn('SSE disconnected, will reconnect automatically...');
+        console.warn('SSE disconnected, browser will reconnect automatically...');
       };
     } catch (err) {
       console.error('EventSource initialization error:', err);
     }
 
-    // Fallback polling interval every 8 seconds
-    const interval = setInterval(fetchInitialData, 8000);
+    // Fallback polling tetap hidup bila SSE terputus atau proxy bermasalah.
+    const interval = setInterval(() => {
+      void fetchLiveData();
+    }, 8000);
 
     return () => {
       if (eventSource) eventSource.close();
       clearInterval(interval);
     };
-  }, [fetchInitialData]);
+  }, [fetchLiveData, fetchInitialHistory]);
 
   // Refresh PLTS manually
   const handleRefreshPlts = async () => {
     try {
-      const res = await fetch('/api/plts/refresh', { method: 'POST' });
+      const res = await fetch('/api/plts/refresh', {
+        method: 'POST',
+        cache: 'no-store',
+      });
       const data = await res.json();
       if (data.summary) {
         setPltsSummary(data.summary);
@@ -162,10 +219,11 @@ export default function App() {
       const res = await fetch('/api/telemetry/simulate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enable: !simulationActive })
+        body: JSON.stringify({ enable: !simulationActive }),
       });
       const data = await res.json();
       setSimulationActive(data.simulationActive);
+      void fetchLiveData();
     } catch (e) {
       console.error('Error toggling simulation:', e);
     }
@@ -177,8 +235,9 @@ export default function App() {
       await fetch('/api/telemetry/reconnect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ broker, topic })
+        body: JSON.stringify({ broker, topic }),
       });
+      setTimeout(() => void fetchLiveData(), 1200);
     } catch (e) {
       console.error('Error reconnecting MQTT:', e);
     }
@@ -196,6 +255,10 @@ export default function App() {
     localStorage.removeItem('nilasense_user');
     setUser(null);
   };
+
+  const telemetryState = mqttStatus.telemetryState || 'waiting';
+  const telemetryStale = !simulationActive && telemetryState === 'stale';
+  const telemetryDelayed = !simulationActive && telemetryState === 'delayed';
 
   return (
     <div className="min-h-screen bg-[#020617] text-slate-100 flex flex-col font-sans selection:bg-cyan-500 selection:text-white">
@@ -215,6 +278,26 @@ export default function App() {
         onToggleSimulation={handleToggleSimulation}
       />
 
+      {/* Warning global bila broker hidup tetapi telemetry sensor tidak fresh. */}
+      {(telemetryStale || telemetryDelayed) && (
+        <div
+          className={`border-b px-4 py-2 text-sm ${
+            telemetryStale
+              ? 'bg-red-950/80 border-red-800/70 text-red-200'
+              : 'bg-amber-950/80 border-amber-800/70 text-amber-200'
+          }`}
+        >
+          <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2">
+            <span className="font-semibold">
+              {telemetryStale ? '⚠ Data sensor MQTT STALE' : '⚠ Data sensor MQTT terlambat'}
+            </span>
+            <span>
+              Telemetry terakhir: {formatTelemetryAge(mqttStatus.telemetryAgeSec)}. Data PLTS dapat tetap live karena menggunakan jalur API yang berbeda.
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
         {activeTab === 'overview' && (
@@ -230,17 +313,11 @@ export default function App() {
         )}
 
         {activeTab === 'hpp' && (
-          <HppProductionDashboard
-            telemetry={telemetry}
-            pltsSummary={pltsSummary}
-          />
+          <HppProductionDashboard telemetry={telemetry} pltsSummary={pltsSummary} />
         )}
 
         {activeTab === 'plts' && (
-          <PltsEnergyFlow
-            summary={pltsSummary}
-            onRefresh={handleRefreshPlts}
-          />
+          <PltsEnergyFlow summary={pltsSummary} onRefresh={handleRefreshPlts} />
         )}
 
         {activeTab === 'charts' && (
@@ -251,11 +328,7 @@ export default function App() {
           />
         )}
 
-        {activeTab === 'diagnostics' && (
-          <SensorDiagnostics
-            telemetry={telemetry}
-          />
-        )}
+        {activeTab === 'diagnostics' && <SensorDiagnostics telemetry={telemetry} />}
 
         {activeTab === 'control' && (
           <DeviceCommandsModal
@@ -265,15 +338,9 @@ export default function App() {
           />
         )}
 
-        {activeTab === 'logs' && (
-          <TelemetryHistoryTable
-            history={history}
-          />
-        )}
+        {activeTab === 'logs' && <TelemetryHistoryTable history={history} />}
 
-        {activeTab === 'guide' && (
-          <TilapiaGuideModal />
-        )}
+        {activeTab === 'guide' && <TilapiaGuideModal />}
       </main>
 
       {/* Footer */}
