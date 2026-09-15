@@ -1,38 +1,51 @@
 import React from 'react';
-import { 
-  Fish, 
-  SunMedium, 
-  Activity, 
-  Cpu, 
-  Terminal, 
-  FileSpreadsheet, 
-  BookOpen, 
-  Wifi, 
-  Radio, 
-  User as UserIcon, 
-  LogIn, 
-  LogOut, 
-  Settings, 
+import {
+  Fish,
+  SunMedium,
+  Activity,
+  Cpu,
+  FileSpreadsheet,
+  BookOpen,
+  Radio,
+  User as UserIcon,
+  LogIn,
+  LogOut,
+  Settings,
   Sparkles,
   Zap,
   Calculator,
-  Wrench
+  Wrench,
+  WifiOff,
 } from 'lucide-react';
 import { TelemetryData, PltsSummary, User } from '../types';
 
-const GearWrenchIcon: React.FC<{ className?: string }> = ({ className = "w-4 h-4" }) => (
+const GearWrenchIcon: React.FC<{ className?: string }> = ({
+  className = 'w-4 h-4',
+}) => (
   <span className="relative inline-flex items-center justify-center shrink-0">
     <Settings className={className} />
     <Wrench className="w-[60%] h-[60%] absolute -bottom-0.5 -right-0.5 text-cyan-300 drop-shadow-[0_1px_2px_rgba(0,0,0,0.9)]" />
   </span>
 );
 
+interface MqttStatusView {
+  connected: boolean;
+  broker?: string;
+  topic?: string;
+  error?: string | null;
+  telemetryState?: 'waiting' | 'live' | 'delayed' | 'stale';
+  telemetryFresh?: boolean;
+  telemetryAgeSec?: number | null;
+  lastTelemetryAt?: string | null;
+  watchdogReconnectCount?: number;
+}
+
 interface NavbarProps {
   activeTab: string;
   setActiveTab: (tab: string) => void;
   telemetry: TelemetryData | null;
   pltsSummary: PltsSummary | null;
-  mqttStatus: { connected: boolean; broker?: string; topic?: string };
+  mqttStatus: MqttStatusView;
   user: User | null;
   onOpenLogin: () => void;
   onOpenProfile: () => void;
@@ -40,6 +53,14 @@ interface NavbarProps {
   onLogout: () => void;
   simulationActive: boolean;
   onToggleSimulation: () => void;
+}
+
+function formatAge(seconds?: number | null) {
+  if (seconds === null || seconds === undefined) return 'menunggu data';
+  if (seconds < 60) return `${seconds}s lalu`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m lalu`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}j lalu`;
+  return `${Math.floor(seconds / 86400)} hari lalu`;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -67,34 +88,122 @@ export const Navbar: React.FC<NavbarProps> = ({
     { id: 'guide', label: 'Panduan Nila', icon: BookOpen },
   ];
 
+  const telemetryState = simulationActive
+    ? 'live'
+    : mqttStatus.telemetryState || 'waiting';
+
+  const sensorStatus = (() => {
+    if (simulationActive) {
+      return {
+        label: 'Demo',
+        dot: 'bg-indigo-400 shadow-[0_0_8px_rgba(129,140,248,0.8)] animate-pulse',
+        text: 'text-indigo-300',
+        border: 'border-indigo-800/70',
+      };
+    }
+    if (!mqttStatus.connected) {
+      return {
+        label: 'Broker Offline',
+        dot: 'bg-red-400',
+        text: 'text-red-300',
+        border: 'border-red-900/70',
+      };
+    }
+    if (telemetryState === 'live') {
+      return {
+        label: 'Live',
+        dot: 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)] animate-pulse',
+        text: 'text-emerald-300',
+        border: 'border-emerald-900/60',
+      };
+    }
+    if (telemetryState === 'delayed') {
+      return {
+        label: 'Delayed',
+        dot: 'bg-amber-400 animate-pulse',
+        text: 'text-amber-300',
+        border: 'border-amber-900/70',
+      };
+    }
+    if (telemetryState === 'stale') {
+      return {
+        label: 'STALE',
+        dot: 'bg-red-400 animate-pulse',
+        text: 'text-red-300',
+        border: 'border-red-900/70',
+      };
+    }
+    return {
+      label: 'Waiting',
+      dot: 'bg-slate-400 animate-pulse',
+      text: 'text-slate-300',
+      border: 'border-slate-800/90',
+    };
+  })();
+
   return (
     <header className="bg-[#0f172a]/85 backdrop-blur-xl border-b border-slate-800/80 text-white sticky top-0 z-30 shadow-[0_4px_20px_-4px_rgba(0,0,0,0.5)]">
       {/* Top Banner: Status Indicators & Credentials info */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex flex-wrap items-center justify-between py-2 border-b border-slate-800/60 text-xs text-slate-400 gap-2">
           <div className="flex items-center flex-wrap gap-3">
-            {/* MQTT status pill */}
+            {/* Broker status: hanya menunjukkan koneksi Render -> EMQX */}
             <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#020617]/90 border border-slate-800/90 shadow-sm">
-              <span className={`w-2 h-2 rounded-full ${mqttStatus.connected ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)] animate-pulse' : 'bg-red-400'}`} />
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  mqttStatus.connected
+                    ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]'
+                    : 'bg-red-400'
+                }`}
+              />
               <span className="font-medium text-slate-300">MQTT Broker:</span>
-              <span className="text-slate-400">broker.emqx.io:1883</span>
-              {mqttStatus.connected && <span className="text-emerald-400 font-semibold ml-1">Live</span>}
+              <span className={mqttStatus.connected ? 'text-emerald-400 font-semibold' : 'text-red-400 font-semibold'}>
+                {mqttStatus.connected ? 'Connected' : 'Disconnected'}
+              </span>
+            </div>
+
+            {/* Freshness telemetry sensor: terpisah dari status broker */}
+            <div
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#020617]/90 border ${sensorStatus.border} shadow-sm`}
+              title={
+                mqttStatus.lastTelemetryAt
+                  ? `Telemetry terakhir: ${mqttStatus.lastTelemetryAt}`
+                  : 'Belum ada telemetry sensor aktual'
+              }
+            >
+              {mqttStatus.connected ? (
+                <Radio className="w-3.5 h-3.5 text-cyan-400" />
+              ) : (
+                <WifiOff className="w-3.5 h-3.5 text-red-400" />
+              )}
+              <span className={`w-2 h-2 rounded-full ${sensorStatus.dot}`} />
+              <span className="font-medium text-slate-300">Sensor:</span>
+              <span className={`${sensorStatus.text} font-bold`}>{sensorStatus.label}</span>
+              {!simulationActive && telemetryState !== 'waiting' && (
+                <span className="text-slate-500">• {formatAge(mqttStatus.telemetryAgeSec)}</span>
+              )}
             </div>
 
             {/* Device ID pill */}
             <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#020617]/90 border border-slate-800/90 shadow-sm">
               <Radio className="w-3.5 h-3.5 text-cyan-400" />
               <span className="font-medium text-slate-300">Device:</span>
-              <span className="text-cyan-300 font-mono font-semibold">{telemetry?.device || 'nila-E0F908'}</span>
-              <span className="text-slate-500">({telemetry?.ip || '192.168.18.187'})</span>
+              <span className="text-cyan-300 font-mono font-semibold">
+                {telemetry?.device || 'nila-E0F908'}
+              </span>
+              {telemetry?.ip && <span className="text-slate-500">({telemetry.ip})</span>}
             </div>
 
             {/* PLTS Status pill */}
             <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#020617]/90 border border-slate-800/90 shadow-sm">
               <Zap className="w-3.5 h-3.5 text-amber-400" />
               <span className="font-medium text-slate-300">PLTS Solar:</span>
-              <span className="text-amber-300 font-semibold">{pltsSummary?.pvPowerW || 54.7} W</span>
-              <span className="text-slate-500">| Bat: {pltsSummary?.batterySocPct || 80}%</span>
+              <span className="text-amber-300 font-semibold">
+                {(pltsSummary?.pvPowerW ?? 0).toFixed(1)} W
+              </span>
+              <span className="text-slate-500">
+                | Bat: {(pltsSummary?.batterySocPct ?? 0).toFixed(0)}%
+              </span>
             </div>
           </div>
 
