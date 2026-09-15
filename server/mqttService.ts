@@ -42,6 +42,8 @@ export interface MqttAckPayload {
   received_at?: string;
 }
 
+export type TelemetryFreshness = 'waiting' | 'live' | 'delayed' | 'stale';
+
 export class MqttAquacultureService extends EventEmitter {
   private client: MqttClient | null = null;
   private brokerUrl: string = 'mqtt://broker.emqx.io:1883';
@@ -49,72 +51,194 @@ export class MqttAquacultureService extends EventEmitter {
   private defaultDeviceId: string = 'nila-E0F908';
   private topic: string = 'aquaculture/nila/data/+/telemetry';
   private cmdTopic: string = 'aquaculture/nila/data/nila-E0F908/command';
-  
+
   public latestTelemetry: TelemetryPayload | null = null;
   public telemetryHistory: TelemetryPayload[] = [];
   public ackHistory: MqttAckPayload[] = [];
   public latestAck: MqttAckPayload | null = null;
   public latestDeviceInfo: Record<string, any> | null = null;
   public latestConfig: Record<string, any> | null = null;
-  public deviceStatus: 'online' | 'offline' | 'unknown' = 'online';
-
+  public deviceStatus: 'online' | 'offline' | 'unknown' = 'unknown';
   public isConnected: boolean = false;
   public connectionError: string | null = null;
+
+  /** Waktu pesan MQTT apa pun terakhir diterima (telemetry/status/ack/config). */
   public lastMessageTime: number = 0;
+
+  /** Waktu TELEMETRY sensor terakhir benar-benar diterima. */
+  public lastTelemetryTime: number = 0;
+
   public messageCount: number = 0;
   public simulationActive: boolean = false;
+
   private simInterval: NodeJS.Timeout | null = null;
+  private watchdogInterval: NodeJS.Timeout | null = null;
+  private brokerConnectedAt: number = 0;
+  private lastWatchdogReconnectAt: number = 0;
+  private watchdogReconnectCount: number = 0;
+
+  // Freshness policy. Sensor normal mengirim lebih cepat dari batas ini.
+  private readonly TELEMETRY_LIVE_MS = 30_000;
+  private readonly TELEMETRY_DELAYED_MS = 60_000;
+  private readonly TELEMETRY_RECONNECT_MS = 90_000;
+  private readonly WATCHDOG_INTERVAL_MS = 15_000;
+  private readonly WATCHDOG_RECONNECT_COOLDOWN_MS = 5 * 60_000;
 
   constructor() {
     super();
     this.initDefaultTelemetry();
+    this.startTelemetryWatchdog();
     this.connect();
   }
 
   private initDefaultTelemetry() {
-    // Initial baseline data from the user's sample
+    // Baseline UI saja. received_at sengaja tidak diisi agar tidak dianggap
+    // sebagai telemetry nyata dan tidak tersimpan ke MongoDB sebagai data sensor.
     this.latestTelemetry = {
       device: 'nila-E0F908',
       firmware_version: '2.0.0-mqtt-cmd',
       command_protocol: '2.0',
       timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-      uptime_s: 18156,
-      ph: 7.65,
-      ph_mv: 2598.5,
-      ph_cal_401: true,
-      ph_cal_686: true,
-      ph_cal_918: true,
-      do_mg_l: 7.89,
-      do_saturation_pct: 98.7,
-      water_temperature_c: 26.6,
-      do_ok: true,
+      uptime_s: 0,
+      ph: null,
+      ph_mv: null,
+      ph_cal_401: false,
+      ph_cal_686: false,
+      ph_cal_918: false,
+      do_mg_l: null,
+      do_saturation_pct: null,
+      water_temperature_c: null,
+      do_ok: false,
       modbus_code: 0,
-      do_raw: [16252, 49569, 16636, 39993, 16852, 64058],
+      do_raw: [],
       do_salinity_ppt: 0,
       do_atmospheric_pressure_kpa: 101.33,
-      wifi_connected: true,
-      wifi_rssi: -76,
-      ip: '192.168.18.187',
-      ap_active: true,
-      ap_ip: '192.168.4.1',
-      mqtt_connected: true,
-      received_at: new Date().toISOString()
+      wifi_connected: false,
+      wifi_rssi: 0,
+      ip: '',
+      ap_active: false,
+      ap_ip: '',
+      mqtt_connected: false,
+      received_at: undefined,
     };
-    this.telemetryHistory.push({ ...this.latestTelemetry });
 
     this.latestAck = {
       id: 'init-ack',
       status: 'ok',
-      message: 'System ready - firmware 2.0.0-mqtt-cmd protocol 2.0',
+      message: 'System ready - waiting for live MQTT telemetry',
       device: 'nila-E0F908',
       protocol: '2.0',
       cmd: 'ping',
       request_id: 'boot',
       timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-      uptime_s: 18156,
-      received_at: new Date().toISOString()
+      uptime_s: 0,
+      received_at: new Date().toISOString(),
     };
     this.ackHistory.push({ ...this.latestAck });
+  }
+
+  private toNullableNumber(value: unknown, fallback: number | null): number | null {
+    if (value === null) return null;
+    if (value === undefined || value === '') return fallback;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+
+  private toNumber(value: unknown, fallback: number): number {
+    const parsed = this.toNullableNumber(value, fallback);
+    return parsed === null ? fallback : parsed;
+  }
+
+  private toBoolean(value: unknown, fallback: boolean): boolean {
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'number') return value !== 0;
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase();
+      if (['true', '1', 'yes', 'on', 'ok'].includes(normalized)) return true;
+      if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+    }
+    return fallback;
+  }
+
+  private getTelemetryFreshness(now = Date.now()): {
+    telemetryState: TelemetryFreshness;
+    telemetryFresh: boolean;
+    telemetryAgeSec: number | null;
+  } {
+    if (this.simulationActive) {
+      return {
+        telemetryState: 'live',
+        telemetryFresh: true,
+        telemetryAgeSec: 0,
+      };
+    }
+
+    if (this.lastTelemetryTime > 0) {
+      const ageMs = Math.max(0, now - this.lastTelemetryTime);
+      const telemetryAgeSec = Math.floor(ageMs / 1000);
+      if (ageMs <= this.TELEMETRY_LIVE_MS) {
+        return { telemetryState: 'live', telemetryFresh: true, telemetryAgeSec };
+      }
+      if (ageMs <= this.TELEMETRY_DELAYED_MS) {
+        return { telemetryState: 'delayed', telemetryFresh: false, telemetryAgeSec };
+      }
+      return { telemetryState: 'stale', telemetryFresh: false, telemetryAgeSec };
+    }
+
+    // Broker baru tersambung tetapi belum ada telemetry sensor nyata.
+    if (this.isConnected && this.brokerConnectedAt > 0) {
+      const waitMs = Math.max(0, now - this.brokerConnectedAt);
+      if (waitMs <= this.TELEMETRY_DELAYED_MS) {
+        return {
+          telemetryState: 'waiting',
+          telemetryFresh: false,
+          telemetryAgeSec: null,
+        };
+      }
+    }
+
+    return {
+      telemetryState: 'stale',
+      telemetryFresh: false,
+      telemetryAgeSec: null,
+    };
+  }
+
+  private startTelemetryWatchdog() {
+    if (this.watchdogInterval) clearInterval(this.watchdogInterval);
+
+    this.watchdogInterval = setInterval(() => {
+      if (!this.client || !this.isConnected || this.simulationActive) return;
+
+      const now = Date.now();
+      const referenceTime = this.lastTelemetryTime || this.brokerConnectedAt;
+      if (!referenceTime) return;
+
+      const staleForMs = now - referenceTime;
+      const reconnectAllowed =
+        now - this.lastWatchdogReconnectAt >= this.WATCHDOG_RECONNECT_COOLDOWN_MS;
+
+      if (staleForMs > this.TELEMETRY_RECONNECT_MS && reconnectAllowed) {
+        this.lastWatchdogReconnectAt = now;
+        this.watchdogReconnectCount += 1;
+
+        console.warn(
+          `[MQTT WATCHDOG] Telemetry sensor tidak diterima selama ${Math.floor(
+            staleForMs / 1000
+          )}s. Mencoba reconnect subscriber MQTT...`
+        );
+
+        try {
+          this.client.reconnect();
+        } catch (error) {
+          console.error('[MQTT WATCHDOG] reconnect() gagal, membuat koneksi baru:', error);
+          this.connect();
+        }
+
+        // Dorong status ke SSE agar UI langsung tahu kondisi stale/reconnect.
+        this.emit('status', this.getStatus());
+      }
+    }, this.WATCHDOG_INTERVAL_MS);
   }
 
   public connect(newBrokerUrl?: string, newBaseTopic?: string) {
@@ -122,10 +246,12 @@ export class MqttAquacultureService extends EventEmitter {
     if (newBaseTopic) {
       this.baseTopic = newBaseTopic.replace(/\/+$/, '');
       this.topic = `${this.baseTopic}/+/telemetry`;
+      this.cmdTopic = `${this.baseTopic}/${this.defaultDeviceId}/command`;
     }
 
     if (this.client) {
       try {
+        this.client.removeAllListeners();
         this.client.end(true);
       } catch (e) {
         console.error('Error closing previous MQTT client', e);
@@ -133,7 +259,7 @@ export class MqttAquacultureService extends EventEmitter {
     }
 
     console.log(`Connecting to MQTT broker: ${this.brokerUrl} on base: ${this.baseTopic}`);
-    
+
     try {
       this.client = mqtt.connect(this.brokerUrl, {
         clientId: `nila_web_${Math.random().toString(16).substring(2, 10)}`,
@@ -145,17 +271,20 @@ export class MqttAquacultureService extends EventEmitter {
       this.client.on('connect', () => {
         this.isConnected = true;
         this.connectionError = null;
+        this.brokerConnectedAt = Date.now();
         console.log(`[MQTT] Connected to ${this.brokerUrl}`);
-        
-        // Subscribe to all device subtopics in wildcard: telemetry, ack, config, status
-        const subTopics = [
-          `${this.baseTopic}/#`,
-          `${this.baseTopic}/+/telemetry`,
-          `${this.baseTopic}/+/ack`,
-          `${this.baseTopic}/+/config`,
-          `${this.baseTopic}/+/status`,
-          `aquaculture/nila/data/#`
-        ];
+
+        // Satu wildcard sudah mencakup telemetry, ack, config, dan status.
+        // Topic eksplisit dipertahankan untuk kompatibilitas bila broker/filter berubah.
+        const subTopics = Array.from(
+          new Set([
+            `${this.baseTopic}/#`,
+            `${this.baseTopic}/+/telemetry`,
+            `${this.baseTopic}/+/ack`,
+            `${this.baseTopic}/+/config`,
+            `${this.baseTopic}/+/status`,
+          ])
+        );
 
         subTopics.forEach((tp) => {
           this.client?.subscribe(tp, (err) => {
@@ -167,14 +296,16 @@ export class MqttAquacultureService extends EventEmitter {
           });
         });
 
-        this.emit('status', { connected: true, broker: this.brokerUrl, baseTopic: this.baseTopic });
+        this.emit('status', this.getStatus());
       });
 
       this.client.on('message', (topic, message) => {
         try {
           const str = message.toString();
+
+          // Ini aktivitas broker umum, BUKAN indikator freshness telemetry sensor.
           this.lastMessageTime = Date.now();
-          this.messageCount++;
+          this.messageCount += 1;
 
           if (topic.endsWith('/telemetry')) {
             const parsed = JSON.parse(str);
@@ -188,17 +319,27 @@ export class MqttAquacultureService extends EventEmitter {
           } else if (topic.endsWith('/status')) {
             const statusStr = str.trim().toLowerCase();
             this.deviceStatus = statusStr === 'online' ? 'online' : 'offline';
-            this.emit('device_status', { status: this.deviceStatus, topic, timestamp: new Date().toISOString() });
+            this.emit('device_status', {
+              status: this.deviceStatus,
+              topic,
+              timestamp: new Date().toISOString(),
+            });
           } else {
-            // General JSON fallback
+            // General JSON fallback jika firmware publish ke topic yang sedikit berbeda.
             try {
               const parsed = JSON.parse(str);
-              if (parsed.ph !== undefined || parsed.do_mg_l !== undefined) {
+              if (
+                parsed.ph !== undefined ||
+                parsed.do_mg_l !== undefined ||
+                parsed.water_temperature_c !== undefined
+              ) {
                 this.handleIncomingTelemetry(parsed);
               } else if (parsed.status === 'ok' || parsed.status === 'error') {
                 this.handleIncomingAck(parsed);
               }
-            } catch {}
+            } catch {
+              // Non-JSON message boleh diabaikan.
+            }
           }
         } catch (err) {
           console.error('[MQTT] Failed to handle message on topic:', topic, err);
@@ -209,18 +350,17 @@ export class MqttAquacultureService extends EventEmitter {
         this.isConnected = false;
         this.connectionError = err.message;
         console.error('[MQTT] Connection error:', err);
-        this.emit('status', { connected: false, error: err.message });
+        this.emit('status', this.getStatus());
       });
 
       this.client.on('close', () => {
         this.isConnected = false;
-        this.emit('status', { connected: false });
+        this.emit('status', this.getStatus());
       });
 
       this.client.on('reconnect', () => {
         console.log('[MQTT] Reconnecting...');
       });
-
     } catch (err: any) {
       this.isConnected = false;
       this.connectionError = err.message;
@@ -231,15 +371,16 @@ export class MqttAquacultureService extends EventEmitter {
   public handleIncomingAck(data: Partial<MqttAckPayload>) {
     const ack: MqttAckPayload = {
       id: `ack-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      status: (data.status === 'error' ? 'error' : 'ok'),
+      status: data.status === 'error' ? 'error' : 'ok',
       message: data.message || (data.status === 'ok' ? 'Success' : 'Error'),
       device: data.device || this.defaultDeviceId,
       protocol: data.protocol || '2.0',
       cmd: data.cmd || '',
       request_id: data.request_id || '',
-      timestamp: data.timestamp || new Date().toISOString().replace('T', ' ').substring(0, 19),
-      uptime_s: data.uptime_s || 0,
-      received_at: new Date().toISOString()
+      timestamp:
+        data.timestamp || new Date().toISOString().replace('T', ' ').substring(0, 19),
+      uptime_s: this.toNumber(data.uptime_s, 0),
+      received_at: new Date().toISOString(),
     };
 
     this.latestAck = ack;
@@ -249,7 +390,9 @@ export class MqttAquacultureService extends EventEmitter {
     }
 
     this.emit('ack', ack);
-    console.log(`[MQTT ACK] [${ack.status.toUpperCase()}] cmd: ${ack.cmd || 'N/A'} - ${ack.message}`);
+    console.log(
+      `[MQTT ACK] [${ack.status.toUpperCase()}] cmd: ${ack.cmd || 'N/A'} - ${ack.message}`
+    );
   }
 
   public handleIncomingConfig(data: Record<string, any>) {
@@ -264,42 +407,81 @@ export class MqttAquacultureService extends EventEmitter {
     }
   }
 
-  public handleIncomingTelemetry(data: Partial<TelemetryPayload>) {
-    this.lastMessageTime = Date.now();
-    this.messageCount++;
+  public handleIncomingTelemetry(data: Partial<TelemetryPayload> | Record<string, any>) {
+    const now = Date.now();
+    const receivedAt = new Date(now).toISOString();
+
+    // Freshness hanya berubah di sini: pesan status/ack/config tidak dianggap telemetry.
+    this.lastTelemetryTime = now;
+    this.deviceStatus = 'online';
+
+    const previous = this.latestTelemetry;
+
+    const ph = this.toNullableNumber(data.ph, previous?.ph ?? null);
+    const doMgL = this.toNullableNumber(data.do_mg_l, previous?.do_mg_l ?? null);
+    const doSaturation = this.toNullableNumber(
+      data.do_saturation_pct,
+      previous?.do_saturation_pct ?? null
+    );
+    const waterTemperature = this.toNullableNumber(
+      data.water_temperature_c,
+      previous?.water_temperature_c ?? null
+    );
 
     const payload: TelemetryPayload = {
-      device: data.device || 'nila-E0F908',
-      firmware_version: data.firmware_version || '2.0.0-mqtt-cmd',
-      command_protocol: data.command_protocol || '2.0',
-      timestamp: data.timestamp || new Date().toISOString().replace('T', ' ').substring(0, 19),
-      uptime_s: typeof data.uptime_s === 'number' ? data.uptime_s : (this.latestTelemetry?.uptime_s || 0) + 5,
-      ph: typeof data.ph === 'number' ? data.ph : (data.ph === null ? null : (this.latestTelemetry?.ph ?? 7.65)),
-      ph_mv: typeof data.ph_mv === 'number' ? data.ph_mv : (this.latestTelemetry?.ph_mv ?? 2598),
-      ph_cal_401: data.ph_cal_401 ?? true,
-      ph_cal_686: data.ph_cal_686 ?? true,
-      ph_cal_918: data.ph_cal_918 ?? true,
-      do_mg_l: typeof data.do_mg_l === 'number' ? data.do_mg_l : (data.do_mg_l === null ? null : (this.latestTelemetry?.do_mg_l ?? 7.89)),
-      do_saturation_pct: typeof data.do_saturation_pct === 'number' ? data.do_saturation_pct : (data.do_saturation_pct === null ? null : (this.latestTelemetry?.do_saturation_pct ?? 98.7)),
-      water_temperature_c: typeof data.water_temperature_c === 'number' ? data.water_temperature_c : (data.water_temperature_c === null ? null : (this.latestTelemetry?.water_temperature_c ?? 26.6)),
-      do_ok: data.do_ok ?? (data.do_mg_l !== null && data.do_mg_l !== undefined),
-      modbus_code: typeof data.modbus_code === 'number' ? data.modbus_code : 0,
-      do_raw: Array.isArray(data.do_raw) ? data.do_raw : [16252, 49569, 16636, 39993, 16852, 64058],
-      do_salinity_ppt: typeof data.do_salinity_ppt === 'number' ? data.do_salinity_ppt : 0,
-      do_atmospheric_pressure_kpa: typeof data.do_atmospheric_pressure_kpa === 'number' ? data.do_atmospheric_pressure_kpa : 101.33,
-      wifi_connected: data.wifi_connected ?? true,
-      wifi_rssi: typeof data.wifi_rssi === 'number' ? data.wifi_rssi : -76,
-      ip: data.ip || '192.168.18.187',
-      ap_active: data.ap_active ?? true,
-      ap_ip: data.ap_ip || '192.168.4.1',
-      mqtt_connected: data.mqtt_connected ?? true,
-      received_at: new Date().toISOString()
+      device: typeof data.device === 'string' && data.device ? data.device : this.defaultDeviceId,
+      firmware_version:
+        typeof data.firmware_version === 'string'
+          ? data.firmware_version
+          : previous?.firmware_version || '2.0.0-mqtt-cmd',
+      command_protocol:
+        typeof data.command_protocol === 'string'
+          ? data.command_protocol
+          : previous?.command_protocol || '2.0',
+      timestamp:
+        typeof data.timestamp === 'string' && data.timestamp
+          ? data.timestamp
+          : new Date().toISOString().replace('T', ' ').substring(0, 19),
+      uptime_s: this.toNumber(data.uptime_s, previous?.uptime_s ?? 0),
+      ph,
+      ph_mv: this.toNullableNumber(data.ph_mv, previous?.ph_mv ?? null),
+      ph_cal_401: this.toBoolean(data.ph_cal_401, previous?.ph_cal_401 ?? false),
+      ph_cal_686: this.toBoolean(data.ph_cal_686, previous?.ph_cal_686 ?? false),
+      ph_cal_918: this.toBoolean(data.ph_cal_918, previous?.ph_cal_918 ?? false),
+      do_mg_l: doMgL,
+      do_saturation_pct: doSaturation,
+      water_temperature_c: waterTemperature,
+      do_ok: this.toBoolean(data.do_ok, doMgL !== null),
+      modbus_code: this.toNumber(data.modbus_code, previous?.modbus_code ?? 0),
+      do_raw: Array.isArray(data.do_raw)
+        ? data.do_raw
+            .map((value: unknown) => Number(value))
+            .filter((value: number) => Number.isFinite(value))
+        : previous?.do_raw || [],
+      do_salinity_ppt: this.toNumber(
+        data.do_salinity_ppt,
+        previous?.do_salinity_ppt ?? 0
+      ),
+      do_atmospheric_pressure_kpa: this.toNumber(
+        data.do_atmospheric_pressure_kpa,
+        previous?.do_atmospheric_pressure_kpa ?? 101.33
+      ),
+      wifi_connected: this.toBoolean(
+        data.wifi_connected,
+        previous?.wifi_connected ?? false
+      ),
+      wifi_rssi: this.toNumber(data.wifi_rssi, previous?.wifi_rssi ?? 0),
+      ip: typeof data.ip === 'string' ? data.ip : previous?.ip || '',
+      ap_active: this.toBoolean(data.ap_active, previous?.ap_active ?? false),
+      ap_ip: typeof data.ap_ip === 'string' ? data.ap_ip : previous?.ap_ip || '',
+      mqtt_connected: this.toBoolean(data.mqtt_connected, true),
+      received_at: receivedAt,
     };
 
     this.latestTelemetry = payload;
     this.telemetryHistory.push(payload);
 
-    // Keep ring buffer limited to last 1000 items
+    // Keep ring buffer limited to last 1000 items.
     if (this.telemetryHistory.length > 1000) {
       this.telemetryHistory.shift();
     }
@@ -310,7 +492,12 @@ export class MqttAquacultureService extends EventEmitter {
   public publishCommand(
     command: string,
     params: Record<string, any> = {},
-    options?: { deviceId?: string; token?: string; requestId?: string; targetTopic?: string }
+    options?: {
+      deviceId?: string;
+      token?: string;
+      requestId?: string;
+      targetTopic?: string;
+    }
   ) {
     return new Promise((resolve, reject) => {
       if (!this.client || !this.isConnected) {
@@ -319,15 +506,18 @@ export class MqttAquacultureService extends EventEmitter {
 
       const deviceId = options?.deviceId || params.device_id || this.defaultDeviceId;
       const targetTopic = options?.targetTopic || `${this.baseTopic}/${deviceId}/command`;
-      const requestId = options?.requestId || params.request_id || `req-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+      const requestId =
+        options?.requestId ||
+        params.request_id ||
+        `req-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
       const token = options?.token || params.token || 'change-this-token';
 
-      // Construct command payload according to NilaWaterMonitor.ino v2 format
+      // Construct command payload according to NilaWaterMonitor.ino v2 format.
       const payloadObj: Record<string, any> = {
         cmd: command,
         request_id: requestId,
-        token: token,
-        ...params
+        token,
+        ...params,
       };
 
       const payloadStr = JSON.stringify(payloadObj);
@@ -338,13 +528,15 @@ export class MqttAquacultureService extends EventEmitter {
         } else {
           console.log(`[MQTT] Published command to ${targetTopic}:`, payloadStr);
 
-          // If simulation is active or in dev mode without real ESP32, generate instant mock ACK for immediate UI feedback
+          // Jika simulation aktif, buat mock ACK untuk feedback UI.
           if (this.simulationActive) {
             setTimeout(() => {
               let mockMsg = 'Command executed successfully';
               if (command.startsWith('cal_ph_')) {
                 const point = command.replace('cal_ph_', '');
-                mockMsg = `ph_${point === '401' ? '4.01' : point === '686' ? '6.86' : '9.18'}_saved_at_${(2500 + Math.random() * 50).toFixed(1)}mV`;
+                mockMsg = `ph_${
+                  point === '401' ? '4.01' : point === '686' ? '6.86' : '9.18'
+                }_saved_at_${(2500 + Math.random() * 50).toFixed(1)}mV`;
               } else if (command === 'cal_ph_finish') {
                 mockMsg = 'ph_3_point_calibration_ready';
               } else if (command === 'cal_do_100') {
@@ -352,7 +544,10 @@ export class MqttAquacultureService extends EventEmitter {
               } else if (command === 'cal_do_zero') {
                 mockMsg = 'do_zero_calibration_written';
               } else if (command === 'sync_time') {
-                mockMsg = `time_synced_${new Date().toISOString().replace('T', ' ').substring(0, 19)}`;
+                mockMsg = `time_synced_${new Date()
+                  .toISOString()
+                  .replace('T', ' ')
+                  .substring(0, 19)}`;
               } else if (command === 'ota_update' || command === 'update_firmware') {
                 mockMsg = 'ota_download_started';
                 setTimeout(() => {
@@ -360,7 +555,7 @@ export class MqttAquacultureService extends EventEmitter {
                     cmd: command,
                     request_id: requestId,
                     status: 'ok',
-                    message: 'ota_success_restarting'
+                    message: 'ota_success_restarting',
                   });
                 }, 3000);
               } else if (command === 'restart') {
@@ -374,7 +569,7 @@ export class MqttAquacultureService extends EventEmitter {
                 status: 'ok',
                 message: mockMsg,
                 timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-                uptime_s: this.latestTelemetry?.uptime_s || 18200
+                uptime_s: this.latestTelemetry?.uptime_s || 0,
               });
             }, 600);
           }
@@ -385,7 +580,7 @@ export class MqttAquacultureService extends EventEmitter {
             requestId,
             topic: targetTopic,
             payload: payloadObj,
-            timestamp: new Date().toISOString()
+            timestamp: new Date().toISOString(),
           });
         }
       });
@@ -403,15 +598,25 @@ export class MqttAquacultureService extends EventEmitter {
       if (this.simInterval) clearInterval(this.simInterval);
       this.simInterval = setInterval(() => {
         if (!this.simulationActive) return;
+
         const now = new Date();
-        const basePh = 7.5 + Math.sin(Date.now() / 60000) * 0.3 + (Math.random() - 0.5) * 0.05;
-        const baseDo = 6.8 + Math.cos(Date.now() / 90000) * 1.1 + (Math.random() - 0.5) * 0.1;
-        const baseTemp = 27.2 + Math.sin(Date.now() / 120000) * 1.5 + (Math.random() - 0.5) * 0.08;
+        const basePh =
+          7.5 +
+          Math.sin(Date.now() / 60000) * 0.3 +
+          (Math.random() - 0.5) * 0.05;
+        const baseDo =
+          6.8 +
+          Math.cos(Date.now() / 90000) * 1.1 +
+          (Math.random() - 0.5) * 0.1;
+        const baseTemp =
+          27.2 +
+          Math.sin(Date.now() / 120000) * 1.5 +
+          (Math.random() - 0.5) * 0.08;
 
         this.handleIncomingTelemetry({
           device: 'nila-E0F908',
           timestamp: now.toISOString().replace('T', ' ').substring(0, 19),
-          uptime_s: (this.latestTelemetry?.uptime_s || 18000) + 3,
+          uptime_s: (this.latestTelemetry?.uptime_s || 0) + 3,
           ph: Number(basePh.toFixed(2)),
           ph_mv: Number((2500 + (7.0 - basePh) * 58.2).toFixed(1)),
           ph_cal_401: true,
@@ -422,7 +627,14 @@ export class MqttAquacultureService extends EventEmitter {
           water_temperature_c: Number(baseTemp.toFixed(1)),
           do_ok: true,
           modbus_code: 0,
-          do_raw: [16250 + Math.floor(Math.random() * 20), 49560 + Math.floor(Math.random() * 20), 16630, 39990, 16850, 64050],
+          do_raw: [
+            16250 + Math.floor(Math.random() * 20),
+            49560 + Math.floor(Math.random() * 20),
+            16630,
+            39990,
+            16850,
+            64050,
+          ],
           do_salinity_ppt: 0,
           do_atmospheric_pressure_kpa: 101.32,
           wifi_connected: true,
@@ -430,30 +642,48 @@ export class MqttAquacultureService extends EventEmitter {
           ip: '192.168.18.187',
           ap_active: true,
           ap_ip: '192.168.4.1',
-          mqtt_connected: true
+          mqtt_connected: true,
         });
       }, 3000);
-    } else {
-      if (this.simInterval) {
-        clearInterval(this.simInterval);
-        this.simInterval = null;
-      }
+    } else if (this.simInterval) {
+      clearInterval(this.simInterval);
+      this.simInterval = null;
     }
 
+    this.emit('status', this.getStatus());
     return this.simulationActive;
   }
 
   public getStatus() {
+    const freshness = this.getTelemetryFreshness();
+
     return {
       connected: this.isConnected,
       broker: this.brokerUrl,
       topic: this.topic,
       cmdTopic: this.cmdTopic,
       error: this.connectionError,
+      deviceStatus: this.deviceStatus,
+
+      // Pesan MQTT apa pun.
       lastMessageTime: this.lastMessageTime,
+      lastMessageAt:
+        this.lastMessageTime > 0 ? new Date(this.lastMessageTime).toISOString() : null,
       messageCount: this.messageCount,
+
+      // Telemetry sensor secara khusus.
+      lastTelemetryTime: this.lastTelemetryTime,
+      lastTelemetryAt:
+        this.lastTelemetryTime > 0
+          ? new Date(this.lastTelemetryTime).toISOString()
+          : null,
+      telemetryAgeSec: freshness.telemetryAgeSec,
+      telemetryState: freshness.telemetryState,
+      telemetryFresh: freshness.telemetryFresh,
+
       simulationActive: this.simulationActive,
       historyCount: this.telemetryHistory.length,
+      watchdogReconnectCount: this.watchdogReconnectCount,
     };
   }
 }
